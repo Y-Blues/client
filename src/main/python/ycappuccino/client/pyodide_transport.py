@@ -1,5 +1,6 @@
 """
-pyodide_transport: the Transport ApiClient uses by default, when none is injected.
+pyodide_transport: the fetch HttpTransport uses when no IHttpFetcher is published (the real
+deployment case: a browser page, running under Pyodide).
 
 NOT verified in this sandbox: there is no real Pyodide runtime available here (no network access
 to fetch it, and this module is plain CPython). This function is written from the known Pyodide
@@ -7,15 +8,25 @@ API surface (pyodide.http.pyfetch, FetchResponse.status/.bytes()), but its exact
 fetch option names, header casing, credentials/CORS handling, and whether FetchResponse.bytes()
 still exists under this shape in the Pyodide version actually loaded by static/index.html - is
 NOT proven by anything in this repository. Manual verification in a real browser is required
-before relying on this in production; see client/README.md.
+before relying on this in production; see client/README.md "Limites et verifications manuelles
+requises".
 
 pyodide.http is imported here, inside the function, never at module import time: this keeps
-ycappuccino.client.http importable (and unit-testable) in plain CPython, where pyodide does not
-exist. The ImportError is turned into an explicit RuntimeError instead of leaking a bare
+ycappuccino.client.transport importable (and unit-testable) in plain CPython, where pyodide does
+not exist. The ImportError is turned into an explicit RuntimeError instead of leaking a bare
 ModuleNotFoundError with no context.
+
+credentials="same-origin": sends the browser's own cookies (if any) alongside the Authorization
+header HttpTransport already attaches - harmless when there is none, and lets a server that also
+issues a session cookie (see permissions_app/README.md's `login_cookie` service) work without
+extra plumbing. It does NOT mean this module reads Set-Cookie: browser fetch() implementations do
+not expose Set-Cookie to JavaScript/Pyodide by spec, which is exactly why HttpTransport's token
+comes from the JSON body of a login service call (`{"token": ...}`, see permissions_app's
+`login` service), never from a response header - NOT verified here, but a documented consequence
+of the fetch spec, not a Pyodide-specific guess.
 """
 
-from ycappuccino.client.http import RawResponse
+from ycappuccino.client.transport import RawResponse
 
 
 async def pyodide_transport(method: str, url: str, headers: dict, body):
@@ -25,8 +36,8 @@ async def pyodide_transport(method: str, url: str, headers: dict, body):
         raise RuntimeError(
             "no transport available: ycappuccino.client.pyodide_transport.pyodide_transport "
             "requires pyodide.http, which is only present when running under Pyodide in a "
-            "browser. Inject a Transport explicitly (e.g. a fake one for tests, or a different "
-            "real one) when running outside Pyodide."
+            "browser. Publish a fake ycappuccino.client.transport.IHttpFetcher component (or "
+            "inject one directly into HttpTransport) when running outside Pyodide, e.g. in tests."
         ) from error
 
     response = await pyfetch(url, method=method, headers=headers, body=body, credentials="same-origin")
