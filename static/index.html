@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+  NOT executable/testable in this repository's CPython test suite: this is a browser asset, meant
+  to be served by a Host (see hosts/README.md) alongside main.py. It could not be opened in a
+  real browser while writing it (no network access to fetch pyscript from the CDN in this
+  sandbox). MANUAL BROWSER VERIFICATION REQUIRED before relying on it - see README.md "Limites et
+  verifications manuelles requises".
+
+  pyscript CDN pinned to an exact version, the same convention already used in this codebase for
+  a CDN-loaded page (see swagger/src/main/python/ycappuccino/swagger/ui.py, which pins
+  swagger-ui-dist@4.5.0 rather than @latest). 2024.11.1 is a real pyscript.net release at the time
+  this file was written; its continued availability is NOT verified here.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="ycappuccino pyscript client demo" />
+  <title>ycappuccino client</title>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css" />
+  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+</head>
+<body>
+  <h1>ycappuccino items</h1>
+  <p>Fetched from <code>/api/items</code> by <code>main.py</code>, running under Pyodide.</p>
+  <ul id="items">
+    <li>loading...</li>
+  </ul>
+  <script type="py" src="./main.py"></script>
+</body>
+</html>
