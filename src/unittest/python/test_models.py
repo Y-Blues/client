@@ -1,6 +1,6 @@
 """
 Proves, in plain CPython (no Pyodide needed: the model code has no Pyodide-specific behaviour),
-that a shared @Item model can be built from a JSON document fetched through ApiClient and read
+that a shared @Item model can be built from a JSON document fetched through RemoteCrud and read
 back with its own get_storage_model(), exactly like ycappuccino.storage.manager.Manager.get_one
 does server-side (create_item(item, document) then model.on_read(False), see
 storage/src/main/python/ycappuccino/storage/manager.py).
@@ -18,8 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "ex
 
 from library.books import Book  # noqa: E402
 
-from fake_transport import FakeTransport  # noqa: E402
-from ycappuccino.client.http import ApiClient  # noqa: E402
+from fake_catalog import FakeItemCatalog  # noqa: E402
+from fake_fetcher import FakeFetcher  # noqa: E402
+from ycappuccino.client.remote_crud import RemoteCrud  # noqa: E402
+from ycappuccino.client.transport import HttpTransport  # noqa: E402
 
 DUNE = {"_id": "dune", "title": "Dune", "pages": 412}
 
@@ -34,12 +36,14 @@ class TestSharedModelRoundTrip(unittest.TestCase):
         self.assertEqual(book._pages, 412)
 
 
-class TestSharedModelFromApiClient(unittest.IsolatedAsyncioTestCase):
-    async def test_a_document_fetched_through_api_client_builds_a_book(self):
-        transport = FakeTransport({("GET", "http://api/api/crud/books/dune"): (200, dict(DUNE))})
-        client = ApiClient("http://api", transport=transport)
+class TestSharedModelFromRemoteCrud(unittest.IsolatedAsyncioTestCase):
+    async def test_a_document_fetched_through_remote_crud_builds_a_book(self):
+        fetcher = FakeFetcher({("GET", "/api/crud/books/dune"): (200, dict(DUNE))})
+        transport = HttpTransport(fetcher=fetcher)
+        await transport.start()
+        crud = RemoteCrud(transport, FakeItemCatalog({"book": "books"}))
 
-        document = await client.get_one("books", "dune")
+        document = await crud.get_one("book", "dune")
         book = Book(document)
         book.on_read(False)
 
