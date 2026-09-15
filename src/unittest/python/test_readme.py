@@ -1,9 +1,10 @@
 """
 Runs, in plain CPython, the parts of README.md's examples that are actually runnable outside a
-browser: constructing an ApiClient with a fake transport, and the Book round-trip. The "Transport"
-example and everything under static/ (pyscript, pyodide.http.pyfetch) are browser-only and are NOT
-exercised here - they cannot be, without a real Pyodide runtime; see README.md "Limites et
-verifications manuelles requises" and "Developper client".
+browser: the app-code-only Catalog component (ICrud/IItemCatalog, never ycappuccino.client
+directly), the Login example (HttpTransport.set_token from a service call's response body), and
+the Book round-trip. Everything under "Bootstrap navigateur" (static/index.html, static/main.py,
+pyodide.loadPackage, micropip) is browser-only and NOT exercised here - it cannot be, without a
+real Pyodide runtime; see README.md "Limites et verifications manuelles requises".
 """
 
 import os
@@ -13,70 +14,84 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "example"))
 
 from library.books import Book  # noqa: E402
+from library.catalog import Catalog  # noqa: E402
 
-from fake_transport import FakeTransport  # noqa: E402
-from ycappuccino.client.http import ApiClient, RawResponse  # noqa: E402
+from fake_catalog import FakeItemCatalog  # noqa: E402
+from fake_fetcher import FakeFetcher  # noqa: E402
+from ycappuccino.client.remote_crud import RemoteCrud  # noqa: E402
+from ycappuccino.client.remote_item_catalog import RemoteItemCatalog  # noqa: E402
+from ycappuccino.client.remote_service_endpoint import RemoteServiceEndpoint  # noqa: E402
+from ycappuccino.client.transport import HttpTransport  # noqa: E402
+
+BOOK_ITEM = {
+    "id": "book", "plural": "books", "app": "library", "module": "library.books",
+    "secure_read": False, "secure_write": False, "writable": True, "multipart": False, "refs": [],
+}
 
 
-class TestReadmeApiClientExample(unittest.IsolatedAsyncioTestCase):
-    """mirrors README.md's "Exemple" section: get_one/get_many/create/update/delete/delete_many/call"""
+class Login:
+    """mirrors README.md's "Session / authentification" example (Login component)"""
 
-    async def asyncSetUp(self):
-        self.transport = FakeTransport(
+    def __init__(self, services, transport):
+        self._services = services
+        self._transport = transport
+
+    async def log_in(self, login, password):
+        result = await self._services.call(
+            "login", "POST", [], {}, {"login": login, "password": password}, None
+        )
+        self._transport.set_token(result.body["token"])
+
+
+class TestReadmeCatalogExample(unittest.IsolatedAsyncioTestCase):
+    """mirrors README.md's "Ce que le code applicatif ecrit" + "Modele partage" sections"""
+
+    async def test_catalog_depends_only_on_the_plain_interfaces_and_gets_wired_by_hand_here(self):
+        fetcher = FakeFetcher(
             {
-                ("GET", "http://localhost:9000/api/crud/books/dune"): (200, {"_id": "dune", "title": "Dune"}),
-                ("GET", "http://localhost:9000/api/crud/books"): (
-                    200,
-                    [{"_id": "dune"}],
-                    {"type": "array", "size": 1},
-                ),
-                ("POST", "http://localhost:9000/api/crud/books"): (
-                    201,
-                    {"_id": "dune", "title": "Dune", "pages": 412},
-                ),
-                ("PUT", "http://localhost:9000/api/crud/books/dune"): (200, {"_id": "dune", "pages": 412}),
-                ("DELETE", "http://localhost:9000/api/crud/books/dune"): (200, {}),
-                ("DELETE", "http://localhost:9000/api/crud/books"): (200, {"deleted": 1}),
-                ("POST", "http://localhost:9000/api/services/echo"): (200, {"hello": "world"}),
+                ("GET", "/api/items"): (200, [BOOK_ITEM], {"type": "array", "size": 1}),
+                ("GET", "/api/crud/books/dune"): (200, {"_id": "dune", "title": "Dune", "pages": 412}),
             }
         )
-        self.client = ApiClient("http://localhost:9000", token="demo", transport=self.transport)
+        transport = HttpTransport(fetcher=fetcher)
+        await transport.start()
+        item_catalog = RemoteItemCatalog(transport)
+        await item_catalog.start()
+        crud = RemoteCrud(transport, item_catalog)
 
-    async def test_the_full_example_runs(self):
-        document = await self.client.get_one("books", "dune")
-        self.assertEqual(document["_id"], "dune")
+        catalog = Catalog(crud, item_catalog)
+        await catalog.start()
 
-        await self.client.get_many("books", {"filter": {"pages": {"$gte": 400}}, "sort": {"title": 1}})
-        await self.client.create("books", {"title": "Dune", "pages": 412})
-        await self.client.update("books", "dune", {"pages": 412})
-        await self.client.delete("books", "dune")
-        deleted = await self.client.delete_many("books", {"pages": {"$lt": 100}})
-        self.assertEqual(deleted, 1)
+        self.assertEqual(catalog.items, [BOOK_ITEM])
 
-        result = await self.client.call("echo", "POST", body={"hello": "world"})
-        self.assertEqual(result, {"hello": "world"})
-
-    async def test_the_shared_model_round_trip_example_runs(self):
-        document = await self.client.get_one("books", "dune")
+        document = await crud.get_one("book", "dune")
         book = Book(document)
         book.on_read(False)
-
-        self.assertEqual(book.get_storage_model()["_id"], "dune")
         self.assertEqual(book.get_storage_model()["title"], "Dune")
 
 
-class TestReadmeFakeTransportExample(unittest.IsolatedAsyncioTestCase):
-    """mirrors README.md's "Transport" section, the CPython-runnable half of it (RawResponse shape)"""
+class TestReadmeLoginExample(unittest.IsolatedAsyncioTestCase):
+    """mirrors README.md's "Session / authentification" login flow"""
 
-    async def test_a_hand_written_fake_transport_matches_raw_response(self):
-        async def fake_transport(method, url, headers, body):
-            body = b'{"status":200,"meta":{"type":"object","size":1},"data":{"_id":"dune"}}'
-            return RawResponse(status=200, headers={}, body=body)
+    async def test_log_in_sets_the_token_from_the_service_result_body(self):
+        fetcher = FakeFetcher({("POST", "/api/services/login"): (200, {"token": "eyJ..."})})
+        transport = HttpTransport(fetcher=fetcher)
+        await transport.start()
+        services = RemoteServiceEndpoint(transport)
+        login = Login(services, transport)
 
-        client = ApiClient("http://api", transport=fake_transport)
-        document = await client.get_one("books", "dune")
+        await login.log_in("alice", "secret")
 
-        self.assertEqual(document, {"_id": "dune"})
+        self.assertEqual(transport.get_token(), "eyJ...")
+
+
+class TestReadmeSharedModelRoundTrip(unittest.TestCase):
+    def test_the_book_round_trip_runs(self):
+        document = {"_id": "dune", "title": "Dune", "pages": 412}
+        book = Book(document)
+        book.on_read(False)
+
+        self.assertEqual(book.get_storage_model(), document)
 
 
 if __name__ == "__main__":
