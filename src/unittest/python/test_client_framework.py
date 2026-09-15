@@ -124,29 +124,32 @@ class TestClientInFramework(unittest.TestCase):
         cls.framework = Framework()
         cls.framework.init(cls.app.yml_path)
         cls.addClassCleanup(cls.framework.stop)
-        wait_until(lambda: cls.framework.context.get_service_reference("Demo"))
+        # generous timeout: this genuinely starts an AsyncRunner OS thread (core/async_runner.py)
+        # to validate every component; under a loaded machine, thread scheduling can be slow.
+        found = wait_until(lambda: cls.framework.context.get_service_reference("Demo"), timeout=15.0)
+        assert found, "Demo component did not register as a service within 15s"
 
     def test_demo_receives_a_real_remote_item_catalog_through_plain_iitemcatalog(self):
         demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.items is not None)
+        wait_until(lambda: demo_module.Demo.items is not None, timeout=15.0)
 
         self.assertEqual(demo_module.Demo.items[0]["id"], "book")
 
     def test_demo_receives_a_real_remote_crud_through_plain_icrud(self):
         demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.document is not None)
+        wait_until(lambda: demo_module.Demo.document is not None, timeout=15.0)
 
         self.assertEqual(demo_module.Demo.document, {"_id": "dune", "title": "Dune"})
 
     def test_demo_receives_a_real_remote_service_endpoint_through_plain_iserviceendpoint(self):
         demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.echo_result is not None)
+        wait_until(lambda: demo_module.Demo.echo_result is not None, timeout=15.0)
 
         self.assertEqual(demo_module.Demo.echo_result, {"echo": {"hi": 1}})
 
     def test_every_call_went_through_the_fake_fetcher_not_a_real_network_call(self):
         fetcher_module = self.app.module("fake_fetcher")
-        wait_until(lambda: len(fetcher_module.FakeFetcher.requests) >= 3)
+        wait_until(lambda: len(fetcher_module.FakeFetcher.requests) >= 3, timeout=15.0)
 
         paths = [path for _, path in fetcher_module.FakeFetcher.requests]
         self.assertIn("/api/items", paths)
