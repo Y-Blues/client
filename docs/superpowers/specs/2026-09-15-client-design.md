@@ -1,194 +1,198 @@
-# client pyscript : design
+# client navigateur : design (v2 — remplace la conception « ApiClient »)
 
-Date : 2026-09-15. Nouveau sous-projet de l'écosystème YCappuccino : un client navigateur (pyscript / Pyodide) qui parle à un `ycappuccino` serveur exposé par `http_server`, en réutilisant si possible le code Python partagé (`api`, `core.decorator_app`, `core.utils`).
+Date de la conception initiale : 2026-09-15. **Révision du 2026-09-16** : refonte complète, demandée explicitement par l'utilisateur après rejet de la première approche (un `ApiClient` HTTP bespoke). Nouvelle ambition, assumée avec ses risques : **le navigateur charge le vrai `ycappuccino.core.framework.Framework`** (vrai Pelix/iPOPO), et le code applicatif dépend des vraies interfaces `ICrud`/`IDrafts`/`IItemCatalog`/`IServiceEndpoint` (`ycappuccino.api.endpoints_storage`/`endpoints_service`), avec une implémentation « remote » de chacune (HTTP/`fetch`) injectée dessous par le même conteneur de DI que côté serveur — le code applicatif ne sait jamais qu'un appel traverse une frontière HTTP. C'est ce que le dépôt `remote` fait déjà pour les appels serveur-à-serveur (`RemoteCall implements IExposedService`), étendu au navigateur et au CRUD.
 
-Dépôt greffé sans code legacy (greenfield), mais qui doit suivre les conventions des dépôts voisins (`uv_build`, `src/main/python` / `src/unittest/python`, tests `unittest`, README en français, specs/plans `docs/superpowers`).
+**Ce risque a été explicitement signalé à l'utilisateur, et explicitement accepté par lui** : `core.async_runner.AsyncRunner` démarre un vrai thread OS pour ponter les méthodes async des composants vers les callbacks synchrones de Pelix ; un build Pyodide standard mono-thread ne peut pas démarrer de vrai thread OS. Ce document ne dilue pas ce risque pour l'éviter — voir §0bis, qui le documente précisément, avec ce qui est vérifiable par lecture du code et ce qui ne l'est pas sans navigateur réel.
 
-## 0. Validation empirique de l'hypothèse centrale
+## 0. Validation empirique du sous-ensemble import-clean (inchangé, toujours valide)
 
-**Hypothèse à vérifier avant tout design** (`core/src/main/python/ycappuccino/core/utils.py`, docstring) : *"This module has no dependency, so that decorators and models can be imported outside of the framework (e.g. by the pyscript client)."* Un commentaire identique existe dans `api/src/main/python/ycappuccino/api/http.py`.
+Cette section date de la première conception et reste valide telle quelle : rien dans la refonte ne change le graphe d'import d'`api`. Elle gate toujours la faisabilité du chargement de modèles/interfaces `api` sous Pyodide.
 
-### Méthode
+### Méthode et résultat
 
-Sur l'interpréteur CPython 3.14 de ce bac à sable (qui **n'a pas** `pelix`/`iPOPO` installé — vérifié : `import pelix` lève `ModuleNotFoundError`), avec seulement `api/src/main/python` et `core/src/main/python` ajoutés à `sys.path` (aucune installation `pip`/`uv`), tentative d'import module par module.
+Sur l'interpréteur CPython de ce bac à sable (sans `pelix`/`iPOPO` installés), avec seulement `api/src/main/python` et `core/src/main/python` ajoutés à `sys.path` :
 
-### Résultats (faits, pas suppositions)
-
-**Import-clean (aucun `import pelix`, ni direct ni transitif, aucun `import yaml`)** — testé et confirmé par exécution réelle :
+**Import-clean (aucun `import pelix`, ni direct ni transitif)** :
 
 | Module | Imports externes réels |
 |---|---|
-| `ycappuccino.api.core_base` | `abc`, `typing`, `logging` (stdlib seul) |
-| `ycappuccino.api.decorators` | `typing`, `functools` (stdlib seul) |
-| `ycappuccino.api.models` | `ycappuccino.api.decorators` uniquement |
-| `ycappuccino.api.http` | `abc`, `dataclasses`, `ycappuccino.api.core_base` |
-| `ycappuccino.api.proxy` | `types`, `json`, `pprint`, `ycappuccino.api.core_base` |
-| `ycappuccino.api.storage` | `abc`, `typing`, `ycappuccino.api.core_base`, `ycappuccino.api.models`, `ycappuccino.api.proxy` |
-| `ycappuccino.api.endpoints_storage` | `abc`, `typing`, `ycappuccino.api.core_base` |
-| `ycappuccino.api.endpoints_service` | `abc`, `dataclasses`, `typing`, `ycappuccino.api.core_base` |
-| `ycappuccino.api.http_server` | `abc`, `typing`, `ycappuccino.api.core_base` |
-| `ycappuccino.core.utils` | aucun import (juste des dict/constantes module-level) |
-| `ycappuccino.core.decorator_app` | `ycappuccino.core.utils` uniquement |
+| `ycappuccino.api.core_base` | stdlib seul |
+| `ycappuccino.api.decorators` | stdlib seul |
+| `ycappuccino.api.models` | `ycappuccino.api.decorators` |
+| `ycappuccino.api.http` | `ycappuccino.api.core_base` |
+| `ycappuccino.api.proxy` | `ycappuccino.api.core_base` |
+| `ycappuccino.api.storage` | `core_base`, `models`, `proxy` |
+| `ycappuccino.api.endpoints_storage` | `ycappuccino.api.core_base` |
+| `ycappuccino.api.endpoints_service` | `ycappuccino.api.core_base` |
+| `ycappuccino.api.http_server` | `ycappuccino.api.core_base` |
+| `ycappuccino.core.utils` | aucun |
+| `ycappuccino.core.decorator_app` | `ycappuccino.core.utils` |
 
-Commande exacte utilisée (reproductible) :
+**Non import-clean (nécessitent réellement `pelix`)** : `ycappuccino.api.component_creator` (import direct), `ycappuccino.core.framework`, `ycappuccino.core.runner`, `ycappuccino.core.component_factory`, `ycappuccino.core.async_runner` (indirectement, via `framework`).
 
-```bash
-python3 -c "
-import sys
-sys.path.insert(0, '.../api/src/main/python')
-sys.path.insert(0, '.../core/src/main/python')
-import ycappuccino.api.decorators, ycappuccino.api.models, ycappuccino.api.core_base
-import ycappuccino.api.http, ycappuccino.api.storage
-import ycappuccino.api.endpoints_storage, ycappuccino.api.endpoints_service, ycappuccino.api.http_server
-import ycappuccino.core.decorator_app, ycappuccino.core.utils
-print('OK')
-"
-# -> OK, sans que 'pelix' apparaisse dans sys.modules
+**Différence décisive avec la v1** : la v1 concluait que le client ne devait **jamais** charger `core.framework` (non clean, jugé hors de portée). La v2 le charge **délibérément** : c'est tout l'objet de la refonte. `iPOPO`/`pelix` deviennent donc de vraies dépendances d'exécution du bundle navigateur, pas seulement une dépendance déclarée-mais-inutilisée comme en v1 — voir §0bis(c) pour ce que cela implique côté empaquetage.
+
+### Deuxième constat empirique (inchangé) : la dépendance déclarée n'est pas le graphe d'import réel
+
+`api/pyproject.toml` déclare `iPOPO>=3.0` sans condition ; `uv add --editable ../api` l'installe réellement. Ce constat justifiait `micropip.install(url, deps=False)` en v1 pour ne *jamais* installer iPOPO. En v2, iPOPO doit être installé — mais toujours explicitement, en tant que wheel nommé, jamais via la résolution automatique de dépendances de `micropip` (dont la compatibilité Pyodide de la résolution elle-même n'est de toute façon pas vérifiée ici) : voir §0bis(b)/(c).
+
+## 0bis. Risques d'exécution navigateur
+
+Section requise explicitement par l'utilisateur, à lire avant tout le reste. Rien ici n'a pu être vérifié dans ce bac à sable (aucun accès réseau pour charger Pyodide/pyscript, aucun navigateur disponible).
+
+### (a) `AsyncRunner` a besoin d'un vrai thread OS
+
+`core/src/main/python/ycappuccino/core/async_runner.py` (lu intégralement) :
+
+```python
+class AsyncRunner(object):
+    def _get_loop(self):
+        with self._lock:
+            if self._loop is None:
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._loop.run_forever, name=self._name, daemon=True
+                )
+                self._thread.start()
+            return self._loop
 ```
 
-**Non import-clean (nécessitent réellement `pelix`)** — confirmé en observant l'échec réel (`ModuleNotFoundError: No module named 'pelix'`) :
+`run()` route soit vers `asyncio.run_coroutine_threadsafe(..., self._get_loop())` (cas normal : un appelant hors du thread du runner), soit vers un `ThreadPoolExecutor` d'appoint (cas de ré-entrance : un appel imbriqué depuis une coroutine qui tourne déjà sur la boucle). Dans les deux cas, **au moins un vrai thread OS est démarré au premier appel**, et c'est `Framework._install_component`/`create_factory_module` (`core/component_factory.py`) qui appelle `runner.run(self._obj.start())` pour **chaque composant natif** au moment de sa validation Pelix — donc ce mécanisme n'est pas une fonctionnalité annexe : c'est ce qui fait démarrer chaque composant du framework, `HttpTransport`/`RemoteCrud`/... compris.
 
-| Module | Raison |
-|---|---|
-| `ycappuccino.api.component_creator` | `from pelix.ipopo.decorators import Property` en ligne 1 : import direct de pelix |
-| `ycappuccino.core.framework` | importe iPOPO/Pelix pour démarrer le vrai framework OSGi |
-| `ycappuccino.core.runner` | importe `core.framework` |
-| (par transitivité, non testés un par un mais dépendant de `component_creator`/`framework`) : `ycappuccino.api.remote`, `ycappuccino.api.scheduler`, `ycappuccino.api.scripts`, `ycappuccino.api.permissions`, `ycappuccino.api.hosts` | importent `ycappuccino.api.proxy.YCappuccinoRemote` — **`proxy` lui-même est clean**, ces modules le sont donc probablement aussi ; non nécessaires au client, non vérifiés individuellement pour ne pas gonfler cette section |
+**Ce qu'on peut affirmer avec certitude, par lecture du code CPython/stdlib** : `threading.Thread(...).start()` délègue in fine à `_thread.start_new_thread` (module C). Sous un interpréteur compilé sans support des threads réels, cet appel **lève une exception à l'exécution** (ce n'est ni un plantage silencieux à l'import, ni un no-op qui laisserait le programme continuer comme si de rien n'était) — c'est le comportement CPython documenté de longue date pour `_thread` sur une build sans threads.
 
-### Correction par rapport à la formulation initiale de la tâche
+**Ce qui n'est PAS vérifiable ici** : la forme exacte de cette erreur sous un build **Pyodide** mono-thread précisément (le message, la classe d'exception, si Pyodide simule un `_thread` factice qui échoue différemment de CPython nu) — aucune installation Pyodide, aucun navigateur, aucun réseau disponibles dans ce bac à sable pour le constater. Ce document ne prétend donc PAS savoir si le framework « plante proprement avec un message clair » ou « plante de façon confuse » sous un Pyodide non threadé : les deux sont plausibles, seul un test en navigateur réel tranchera.
 
-La consigne envisageait que `api.storage` pourrait ne **pas** être clean ("not `api.storage`"). **Fait vérifié : c'est faux** — `api.storage` (le port `IManager`/`ITrigger`/`IFilter`, pas l'implémentation mémoire/Mongo qui vit dans le dépôt `storage`) importe seulement `core_base`, `models` et `proxy`, tous les trois clean. Le sous-ensemble réellement clean est donc plus large que supposé : la quasi-totalité d'`api` sauf `component_creator` (et les modules qui ne dépendent que de lui/`framework`, non utiles au client).
+**Prérequis pour que ça marche du tout** : un build Pyodide **pthread** (compilé avec le support des threads WebAssembly, qui repose sur `SharedArrayBuffer`), servi par une page envoyant `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` (ces deux en-têtes sont la condition posée par les navigateurs modernes pour autoriser `SharedArrayBuffer`, suite aux mitigations Spectre). Voir Partie C (`hosts`, `Host.cross_origin_isolated`) pour l'ajout correspondant. **Non vérifié ici** : que la distribution standard `pyodide.js` d'un CDN (celle référencée par `static/index.html`) sélectionne automatiquement, ou permette de sélectionner explicitement, un build pthread ; ni que ce build fonctionne réellement une fois les en-têtes en place. À vérifier contre la documentation Pyodide réelle avant toute mise en production.
 
-### Deuxième constat empirique, décisif pour l'emballage : la dépendance déclarée dans `pyproject.toml` n'est PAS le graphe d'import
+### (b) PyYAML dans le navigateur
 
-`api/pyproject.toml` déclare `dependencies = ["iPOPO>=3.0"]` **sans condition ni extra**. Conséquence vérifiée : `uv add --editable ../api` dans un projet neuf installe bien iPOPO et sa dépendance `jsonrpclib-pelix`, même si aucun module réellement importé n'en a besoin :
+`Framework.init(yml_path)` (`core/framework.py`, ligne ~222) fait inconditionnellement :
 
-```
-$ uv add --editable /home/.../api
-Resolved 4 packages ...
- + ipopo==3.2.2
- + jsonrpclib-pelix==1.1.0
- + ycappuccino-api==0.1.0 (from file:///.../api)
+```python
+with open(yml_path, "r") as file:
+    self.application_yaml = yaml.safe_load(file) or {}
 ```
 
-**Implication pour Pyodide** : `micropip.install()` résout par défaut les dépendances déclarées dans les métadonnées du wheel. Installer le wheel `ycappuccino-api` tel quel dans Pyodide déclencherait donc une tentative d'installation d'`iPOPO`/`jsonrpclib-pelix`, dont la compatibilité Pyodide est inconnue et non nécessaire ici. **Décision : le bootstrap navigateur doit appeler `micropip.install(url, deps=False)`** pour les wheels `ycappuccino-api`/`ycappuccino-core`, ce qui installe le code du module sans résoudre ses dépendances déclarées — sûr précisément parce que le constat ci-dessus prouve que les modules réellement importés par le client n'en ont pas besoin à l'exécution.
+`PyYAML` a une extension C optionnelle (`LibYAML`/`CSafeLoader`) dont la compatibilité Wasm n'est pas garantie a priori. **Décision** : charger `pyyaml` via le chargeur de paquets **curaté** de Pyodide, `await pyodide.loadPackage("pyyaml")` — appelé côté Python via le pont `pyodide_js` (`import pyodide_js; await pyodide_js.loadPackage("pyyaml")`, voir `static/main.py`) — **avant** tout `micropip.install`, plutôt que de laisser `micropip`/PyPI résoudre PyYAML lui-même. **Non vérifié ici, à vérifier contre la documentation Pyodide réelle avant mise en production** : (1) que `pyyaml` figure bien dans la liste de paquets curatés de la version de Pyodide effectivement chargée par `static/index.html` ; (2) que `pyodide_js.loadPackage` est bien la façon documentée d'appeler `pyodide.loadPackage` depuis du code Python tournant dans Pyodide (écrit à partir de la connaissance de l'existence d'un module-pont `pyodide_js`, non confirmé contre la documentation Pyodide réelle dans ce bac à sable).
 
-### Ce que cela valide
+### (c) `Framework.init(yml_path)` veut un vrai chemin de fichier — résolu côté bootstrap, pas dans `core`
 
-Le postulat central est confirmé : un module de modèles `@Item` écrit pour le serveur (ex. `library/books.py` du dépôt `storage`, ou son équivalent dans `client/example/`) — s'il n'importe que `ycappuccino.api.decorators` / `ycappuccino.api.models` (jamais `api.component_creator`, jamais `core.framework`/`core.runner`, jamais Pelix directement) — est importable et utilisable tel quel dans Pyodide, sans compilation ni adaptation, avec la même sémantique (`get_storage_model()`, setters `@Property`) qu'côté serveur.
+`init()` fait `open(yml_path, "r")` : un vrai chemin de fichier, pas une chaîne YAML en mémoire. **`core` n'est pas modifié** pour changer cette signature. Résolu entièrement dans `static/main.py` : `conf/application.yml` et les modules du paquet de démo (`bundle/library/...`) sont écrits dans le système de fichiers virtuel de Pyodide avec de simples `open(path, "w")` Python, **avant** l'appel à `Framework().init(...)` — le FS de Pyodide (mémoire, `MEMFS` par défaut) supporte cette écriture nativement, sans aucune API spéciale.
 
-### Ce qui reste non vérifié (hors de portée de ce bac à sable)
+### (d) `Set-Cookie` illisible en `fetch` — conséquence sur le choix du service de connexion
 
-- Que Pyodide/Wasm exécute réellement ces modules sans surprise (pas d'API CPython C absente, pas de récursion `sys.path` différente). Le code de ces modules est du Python pur stdlib (`abc`, `typing`, `functools`, `dataclasses`) : risque jugé très faible, mais **non prouvé en conditions réelles Pyodide**.
-- Que `micropip.install(url, deps=False)` se comporte comme documenté sur la version de Pyodide réellement utilisée.
-- Que `pyodide.http.pyfetch` fonctionne comme utilisé dans `ycappuccino.client.http` (voir §3).
+Les navigateurs n'exposent jamais `Set-Cookie` à JavaScript/Pyodide via `fetch()`, par spécification (protection contre l'exfiltration de cookies). `permissions_app` expose deux services de connexion (`login` -> `{"token"}` dans le corps, `login_cookie` -> même chose + `Set-Cookie`, voir `permissions_app/README.md`). Le choix pour ce client est **`login`**, jamais `login_cookie` : le jeton voyage dans le corps JSON, lu explicitement par l'application, posé sur `HttpTransport.set_token()`. `RemoteServiceEndpoint`/`ServiceResult.headers` ne peuvent structurellement pas relayer un `Set-Cookie` utile ici, contrairement à `remote/call.py` qui relaie des en-têtes serveur-à-serveur sans cette contrainte.
+
+### (e) COOP/COEP contre les CDN tiers — tension réelle, non résolue
+
+Activer `Host.cross_origin_isolated` (voir Partie C) pour obtenir (a) peut **casser le chargement de Pyodide/pyscript depuis un CDN public** si ce CDN n'envoie pas lui-même des en-têtes `Cross-Origin-Resource-Policy`/CORS compatibles avec `Cross-Origin-Embedder-Policy: require-corp` (qui refuse de charger toute ressource cross-origin dépourvue de ces en-têtes). Ni `client` ni `hosts` ne contrôlent les en-têtes envoyés par un CDN tiers. **Non vérifiable dans ce bac à sable** (pas de réseau) : vérification manuelle en navigateur réel requise, propre à chaque CDN/déploiement.
 
 ## 1. Domaine et périmètre
 
-Le client est un **client HTTP pur** pour l'API exposée par `http_server` (voir `http_server/README.md`) : enveloppe `{"status", "meta", "data"}`, routes `/api/crud/<pluriel>`, `/api/drafts/...`, `/api/items/...`, `/api/services/<nom>`. Il ne réimplémente aucune logique métier : il sérialise des requêtes HTTP et désérialise l'enveloppe JSON.
+Le client fournit quatre composants natifs — `RemoteCrud`, `RemoteDrafts`, `RemoteItemCatalog`, `RemoteServiceEndpoint` (`ycappuccino.client.remote_crud`/`remote_drafts`/`remote_item_catalog`/`remote_service_endpoint`) — qui **implémentent réellement** `ICrud`/`IDrafts`/`IItemCatalog`/`IServiceEndpoint` (`ycappuccino.api.endpoints_storage`/`endpoints_service`), auto-découverts par `Framework.load_bundles()` dès que `bundle_prefix` contient `"ycappuccino.client"` — exactement l'ergonomie de `ycappuccino.storage` fournissant un `IManager`, ou d'`ycappuccino.endpoints_service` fournissant un `IServiceEndpoint`. Le code applicatif ne les nomme ni ne les construit jamais : il dépend des interfaces `api`, point.
 
-Il n'est **pas** un `YCappuccinoComponent` : pas de Pelix, pas de framework, pas de cycle de vie `start`/`stop` géré par un conteneur — un simple objet Python asynchrone instancié par le script de la page.
+Ce n'est **pas** un client HTTP autonome sans framework (c'était la v1) : c'est le vrai `Framework`, avec toute sa mécanique (DI par constructeur, cycle de vie `start`/`stop`, `AsyncRunner`, scan `bundle_prefix`), chargé sous Pyodide.
 
-Hors périmètre (documenté, pas construit) :
-- Installation réelle depuis PyPI : `ycappuccino-api`/`ycappuccino-core`/`ycappuccino-client` n'y sont pas publiés. En déploiement réel, les wheels sont construites (`uv build`) et servies par un `Host` (dépôt `hosts`) à une URL statique, puis installées par `micropip.install(url, deps=False)` (voir §0). CI/publication vers un vrai index : hors périmètre de ce sous-projet.
-- Un vrai test en navigateur (Pyodide réel) : impossible dans ce bac à sable (pas de réseau pour charger le CDN). Tout ce qui touche `pyodide.http.pyfetch` et `static/index.html`/`static/main.py` est écrit avec soin mais **marqué vérification manuelle requise**.
-- L'authentification (JWT) : le client accepte un jeton optionnel et l'envoie en `Authorization: Bearer <token>`, comme le lit `IAuthentication` côté serveur (voir `http_server/README.md`) ; aucune logique de rafraîchissement de jeton, de login, etc.
+Hors périmètre (documenté, pas construit) : installation réelle depuis PyPI (les wheels `ycappuccino-api`/`-core`/`-client` n'y sont pas publiées — construites et servies par un `Host`, voir §6) ; un vrai test en navigateur (impossible dans ce bac à sable) ; la construction du build Pyodide pthread lui-même.
 
-## 2. Le client HTTP (`ycappuccino.client.http`)
+## 2. Décisions de conception (Partie A du mandat)
 
-### Décision : refléter les signatures serveur, pas les réinventer
+### A.1 — Le paramètre `subject` : conservé pour la signature, ignoré à l'exécution
 
-`endpoints_storage.ICrud` et `endpoints_service.IServiceEndpoint` (les deux ports que `http_server` adapte) donnent le vocabulaire : mêmes noms de méthode, même ordre de paramètres (moins `subject`, qui n'existe pas côté client — c'est le serveur qui le déduit des en-têtes HTTP), pour que le modèle mental d'un développeur habitué au serveur transfère directement.
+`ICrud.get_one(self, item_id, id, params=None, subject=None)` (et les dix méthodes analogues d'`IDrafts`/`IItemCatalog`/`IServiceEndpoint.call`) prennent un `subject`. Côté serveur, c'est le dict JWT déjà décodé, utilisé par `IAuthorization.is_authorized`. Côté navigateur, il n'existe rien de tel : le navigateur ne décode jamais de JWT lui-même.
 
-| Méthode client (`ApiClient`) | Route HTTP | Équivalent serveur |
+**Décision retenue : `subject` reste un paramètre de la signature (parité d'interface complète — le code type-check identiquement des deux côtés), mais sa valeur est silencieusement ignorée**, jamais inspectée, jamais transmise au serveur.
+
+**Alternative rejetée, et pourquoi** : lever une erreur quand `subject is not None` (honnêteté stricte : « ce paramètre n'a pas de sens ici, ne prétends pas qu'il en a un »). Rejetée parce qu'elle romprait précisément la promesse centrale de cette refonte — qu'une fonction/​un composant écrit pour prendre un `ICrud` en dépendance et l'appeler avec un `subject` (un style de code tout à fait normal et attendu côté serveur, par ex. un middleware d'audit générique) **casserait spécifiquement au déploiement navigateur**, en réintroduisant exactement la conscience de frontière HTTP que le design entier cherche à faire disparaître. La verrue documentée (un `subject` passé par erreur ou par habitude est silencieusement sans effet, jamais signalé) est jugée strictement préférable à une régression de portabilité du code applicatif. L'authentification réelle est déplacée au niveau du transport (A.4) : c'est le serveur, avec son propre sujet décodé depuis le jeton porteur, qui prend la décision d'autorisation — exactement comme pour n'importe quel autre appelant HTTP du même `http_server`.
+
+### A.2 — État de session : fusionné dans `HttpTransport`, pas de composant séparé
+
+Alternative envisagée par le mandat : un composant `BrowserSession` séparé, publié sous son propre nom/interface, ou un simple objet partagé pris en dépendance constructeur par les quatre `Remote*`.
+
+**Décision retenue : fusion dans `HttpTransport`** (`set_token`/`get_token`/`clear_token`), pas de composant séparé. Justification : il n'existe qu'**un seul** transport (un seul backend, même origine) — donc un seul endroit a besoin du jeton. Scinder en deux composants (`BrowserSession` + `HttpTransport`) ajouterait un saut de câblage (`HttpTransport` dépendrait de `BrowserSession` pour lire le jeton à chaque requête) sans aucun gain comportemental observable ; ça multiplierait aussi les composants pour les tests à doubler. Pas de nouvelle interface `api` (respect de la contrainte « ne pas toucher `api`/`core` ») : `HttpTransport` est un composant natif ordinaire, dépendance directe des quatre `Remote*`.
+
+Un flux de connexion (mirroring `permissions_app`'s `LoginService` — voir README.md) appelle `IServiceEndpoint.call("login", "POST", [], {}, {"login", "password"}, None)`, obtient `{"token": ...}` dans `ServiceResult.body`, et pose `transport.set_token(...)` — voir §0bis(d) pour pourquoi c'est `login`, pas `login_cookie`.
+
+### A.3 — URL de base : relative même origine par défaut, `IConfiguration` pour la surcharger
+
+`/api` par défaut (chemin relatif : le client est servi par le même backend qu'il appelle, via un `Host`). Surchargeable par `IConfiguration` (`ycappuccino.api.core`, le composant `Configuration` de `core`, qui lit `conf/config.properties`) sous la clé `client.base_url` — même mécanisme que `hosts` utilise pour `<id>.login`/`<id>.password` : une valeur d'environnement, lue une fois au démarrage, jamais rechargée à chaud. `HttpTransport.start()` lit cette clé ; en son absence (pas d'`IConfiguration` publié, ou clé absente), le défaut `/api` s'applique.
+
+### A.4 — Transport : `HttpTransport`, composant natif, singleton réel injecté
+
+**Décision retenue (la recommandation du mandat) : oui**, `HttpTransport` est un vrai `YCappuccinoComponent`, publié sous son propre nom de classe (comme tout composant natif — `core/README.md`, « Services publiés »), injecté par constructeur dans chacun des quatre `Remote*`. C'est un singleton **réel** garanti par le conteneur Pelix (une seule instance de service par framework), pas une convention de code.
+
+Le fetch bas niveau lui-même est délégué à une interface définie **dans ce dépôt**, `IHttpFetcher(YCappuccinoComponent, ABC)` (`ycappuccino.client.transport`) — pas dans `api` : `describe_component`/`_dependency` (`core/component_factory.py`) traitent tout sous-type de `YCappuccinoComponent` comme un type de dépendance injectable, ce n'est pas réservé aux interfaces déclarées dans `api`. Cette liberté est exploitée pour permettre au test d'intégration réel (§8) de publier un faux `IHttpFetcher` et de faire tourner tout le reste — `RemoteCrud`, `RemoteItemCatalog`, `RemoteServiceEndpoint`, `HttpTransport` lui-même — via le **vrai** framework, en CPython, sans jamais toucher au réseau ni à Pyodide. En production, aucun `IHttpFetcher` n'est publié (dépendance `Optional[IHttpFetcher]`) : `HttpTransport.request()` retombe alors sur l'import paresseux `ycappuccino.client.pyodide_transport.pyodide_transport`, seul endroit du dépôt qui importe `pyodide` (à l'intérieur d'une fonction, jamais au niveau module).
+
+**Piège d'ordonnancement identifié et maîtrisé** : une dépendance `Optional[IHttpFetcher]` non agrégée n'est câblée par `create_factory_module` (`core/component_factory.py`) qu'**au moment de la validation** du composant qui la porte (`HttpTransport`) — il n'y a pas de callback `bind`/`un_bind` pour une dépendance optionnelle simple (seules les collections `list[...]` et les `bind()` de `YCappuccinoComponentBind` en ont un, voir la lecture de `create_factory_module`). Si un faux `IHttpFetcher` de test devient disponible **après** que `HttpTransport` a déjà validé avec `fetcher=None`, il ne sera **jamais** rattrapé. Le test d'intégration (§8) neutralise ce piège en listant le paquet du faux `IHttpFetcher` **avant** `"ycappuccino.client"` dans `bundle_prefix` : `Framework.load_bundles()` installe et valide les bundles paquet par paquet, dans l'ordre de `bundle_prefix` (`core/framework.py`, `load_bundles`/`_import_modules`) — le même principe que `hosts`/`scheduler` utilisent déjà pour garantir qu'un document/tâche de bootstrap existe avant qu'un composant à chargement unique ne le lise (voir leurs README, « Un seul servlet, plusieurs montages » / commentaire de `test_scheduler_framework.py`).
+
+### A.5 — Traduction des erreurs
+
+`ycappuccino.client.transport.decode_envelope(response: RawResponse) -> dict` décode l'enveloppe `{"status", "meta", "data"}` et lève `NotAuthenticated`/`Forbidden`/`NotFound`/`InvalidRequest`/`CrudError` générique selon le statut HTTP — adapté de `remote/call.py::_translate` (lu intégralement), **pas importé** : `client` ne doit pas dépendre de `remote`, dont le modèle d'adressage (un registre `RemoteServer` de pairs nommés, adressés par `extra_path`) ne s'applique pas à un client navigateur qui n'a qu'un seul backend fixe, même origine. La fonction est volontairement plus générale que celle de `remote` : elle ne construit pas de `ServiceResult` (utile uniquement à `RemoteServiceEndpoint`), et sert aux quatre `Remote*`.
+
+## 3. `item_id` → pluriel : résolution par `IItemCatalog`
+
+Vérifié en lisant `http_server/src/main/python/ycappuccino/http_server/servlet.py` (`ApiServlet._route_crud`/`_item_id`), pas seulement le README : les routes sont en pluriel (`/api/crud/<pluriel>[/<id>]`), et `ApiServlet` résout `plural -> item_id` via `self._catalog.get_item_by_plural(plural, subject)["id"]` avant d'appeler `ICrud`. `RemoteCrud`/`RemoteDrafts` ont besoin de la résolution **inverse**, `item_id -> plural`, puisque leurs propres méthodes reçoivent un `item_id` (contrat `ICrud`) mais doivent construire une URL en pluriel.
+
+**Décision retenue** : `RemoteCrud`/`RemoteDrafts` prennent `catalog: IItemCatalog` en dépendance constructeur (dans les faits, l'aussi auto-découvert `RemoteItemCatalog`) et appellent `(await catalog.get_item(item_id))["plural"]` — la vue publique d'un item contient `plural` (`endpoints_storage/README.md`, « Métadonnées : IItemCatalog »). Alternative rejetée : supposer une convention (`item_id + "s"`), incorrecte en général (pluriels irréguliers, `plural` explicitement configurable côté modèle `@Item`) et un couplage implicite fragile. C'est exactement le genre de câblage transversal entre composants pour lequel le vrai conteneur de DI existe — la seule alternative honnête à une convention de nommage fragile.
+
+`RemoteItemCatalog` lui-même récupère `GET /api/items` **une seule fois, à `start()`**, et met en cache la liste par `id`/`plural` — pas de rechargement à chaud, documenté comme simplification délibérée (même précédent que `scheduler`/`hosts`, voir leurs README). `get_schema`/`get_empty` ne font pas partie de cette liste (routes séparées, `/api/items/<pluriel>/schema`/`empty`) et interrogent le réseau à chaque appel, après résolution du pluriel via le cache.
+
+## 4. Emballage : composants navigateur vs. code applicatif hôte
+
+| Partie | Nature | Consommé par |
 |---|---|---|
-| `get_one(plural, id, params=None)` | `GET /api/crud/<plural>/<id>` | `ICrud.get_one` |
-| `get_many(plural, params=None)` | `GET /api/crud/<plural>` | `ICrud.get_many` |
-| `create(plural, fields)` | `POST /api/crud/<plural>` | `ICrud.create` |
-| `update(plural, id, fields)` | `PUT /api/crud/<plural>/<id>` | `ICrud.update` |
-| `delete(plural, id)` | `DELETE /api/crud/<plural>/<id>` | `ICrud.delete` |
-| `delete_many(plural, filter)` | `DELETE /api/crud/<plural>?filter=...` | `ICrud.delete_many` |
-| `call(name, method="POST", extra_path=None, params=None, body=None)` | `<method> /api/services/<name>[/<segment>...]` | `IServiceEndpoint.call` |
+| `ycappuccino.client.transport` (`HttpTransport`, `IHttpFetcher`, `RawResponse`, `decode_envelope`) | composant natif + interface locale, testable en CPython | les quatre `Remote*` |
+| `ycappuccino.client.remote_crud`/`remote_drafts`/`remote_item_catalog`/`remote_service_endpoint` | composants natifs, publiés sous `ICrud`/`IDrafts`/`IItemCatalog`/`IServiceEndpoint` | auto-découverts par `bundle_prefix`, jamais nommés par le code applicatif |
+| `ycappuccino.client.pyodide_transport` | fonction, import `pyodide` paresseux (jamais au niveau module) | `HttpTransport`, uniquement si aucun `IHttpFetcher` n'est publié |
+| `client/example/library/{books,catalog}.py` | modèle `@Item` + composant de démo, non empaquetés dans le wheel | démonstration/tests, jamais le wheel `ycappuccino-client` |
+| `client/static/{index.html,main.py}` | assets navigateur bruts, servis par un `Host` | jamais exécutés/testés en CPython |
 
-`get_many` retourne `{"items": [...], "total": <meta.size>}` (même forme que `ICrud.get_many`), reconstruit depuis l'enveloppe (`data` -> `items`, `meta.size` -> `total`). `delete_many` retourne l'entier supprimé (`data["deleted"]`), comme `ICrud.delete_many -> int`. `call` retourne directement `data` (le corps de `ServiceResult`).
+`pyproject.toml` déclare maintenant `ycappuccino-api` **et** `ycappuccino-core` en dépendances `uv` normales (sources locales éditables) : contrairement à la v1, `core.framework`/`core.testing` sont de vraies dépendances d'exécution (le test d'intégration §8 démarre un vrai `Framework`), pas seulement une dépendance transitive inutilisée.
 
-### Encodage des paramètres
+Le bootstrap navigateur (`static/main.py`) `micropip.install(url, deps=False)` quatre wheels, dans l'ordre : `iPOPO`, `ycappuccino-api`, `ycappuccino-core`, `ycappuccino-client` — après `pyodide.loadPackage("pyyaml")` (§0bis(b)). `deps=False` reste nécessaire (la déclaration `iPOPO>=3.0` d'`api` n'est pas conditionnée), mais **iPOPO lui-même doit désormais être installé** (contrairement à la v1, qui ne le chargeait jamais) : c'est la brique la plus risquée de toute la chaîne, sa compatibilité Pyodide n'étant vérifiée nulle part dans ce dépôt.
 
-Une requête `GET`/`DELETE` transmet ses paramètres en query string ; `filter`/`sort` sont des dicts côté appelant Python mais du texte JSON côté HTTP (cf. `storage/README.md` : *"Les valeurs texte correspondent à ce qu'envoie un client HTTP"*). `ApiClient` sérialise donc en JSON toute valeur `dict`/`list` d'un paramètre, laisse les scalaires tels quels.
+## 5. Modèles partagés (inchangé)
 
-### Erreurs : réutilisation directe d'`api.endpoints_storage`
+`example/library/books.py` : `Book(Model)`, `@Item(collection="books", name="book", plural="books")`, n'important que `ycappuccino.api.decorators`/`ycappuccino.api.models` (sous-ensemble import-clean, §0). `example/library/catalog.py` (nouveau) : `Catalog(YCappuccinoComponent)`, dépendant de `crud: ICrud`/`catalog: IItemCatalog` — jamais de `ycappuccino.client` — qui peuple `self.items` à `start()`. C'est la preuve, par composition réelle et non par une fonction de test isolée, que le câblage bout en bout fonctionne.
 
-Puisque `ycappuccino.api.endpoints_storage` est import-clean (§0) et déjà une dépendance du paquet `ycappuccino-client` (voir §4), `ApiClient` mappe les codes HTTP de retour vers **les mêmes classes d'exception** que celles que `http_server` traduit depuis `endpoints_storage` : 401 -> `NotAuthenticated`, 403 -> `Forbidden`, 404 -> `NotFound`, 400 -> `InvalidRequest`, autre code d'erreur -> `CrudError` générique. Un code applicatif qui attrape `NotFound` côté serveur (dans un test, ou dans une future Single Page App isomorphe) attrape la même classe côté client.
+## 6. Bootstrap navigateur : `static/index.html` + `static/main.py`
 
-### Transport : `pyodide.http.pyfetch` avec repli explicite
+Séquence complète (voir README.md pour le détail commenté) : Pyodide chargé sur une page COOP/COEP (Partie C) avec un build pthread (§0bis(a), non vérifié) → `pyodide.loadPackage("pyyaml")` (§0bis(b)) → `micropip.install(..., deps=False)` × 4 (§4) → écriture de `conf/application.yml` + du paquet de démo dans le FS virtuel (§0bis(c)) → `Framework().init("conf/application.yml")` → lecture du service résolu par DI (`framework.context.get_service_reference("Catalog")`) → rendu DOM minimal.
 
-`ApiClient` ne dépend jamais de `pyodide` au moment de l'import (sinon le paquet ne serait pas testable en CPython nu). Le transport est une fonction injectable :
+**Rien de cette séquence n'a été exécuté dans ce bac à sable.** Marqué vérification manuelle requise, sans exception, dans le code (`static/main.py`, commentaires de tête et inline) et dans le README.
 
-```python
-async def transport(method: str, url: str, headers: dict, body: bytes | None) -> RawResponse:
-    ...  # -> RawResponse(status: int, headers: dict, body: bytes)
-```
-
-- Sans transport explicite, `ApiClient` tente `ycappuccino.client.pyodide_transport.pyodide_transport`, qui importe `pyodide.http` **à l'intérieur de la fonction** (pas au niveau module) : si `pyodide` n'est pas disponible (donc pas dans un navigateur), l'appel lève un `RuntimeError` explicite ("no transport available: not running under Pyodide; inject a Transport for testing") **au moment de l'appel**, jamais un `ImportError` silencieux ni un plantage à l'import du paquet.
-- Pour les tests CPython, on injecte un `FakeTransport` (dict d'URL -> réponse, ou callable) : c'est ce que valide `test_http.py`.
-- **Non vérifié ici** (pas de Pyodide réel dans ce bac à sable) : le comportement réel de `pyodide.http.pyfetch` (signature exacte des kwargs, forme de `FetchResponse`, gestion des credentials/cookies, CORS). Le code de `pyodide_transport.py` est écrit du mieux possible par lecture de la documentation Pyodide connue, mais **marqué vérification manuelle requise en navigateur**.
-
-## 3. Modèles partagés : la preuve par le round-trip CPython
-
-`client/example/library/books.py` définit un `Book(Model)` minimal, décoré `@Item`/`@Property`, qui n'importe que `ycappuccino.api.decorators` et `ycappuccino.api.models` (le sous-ensemble clean identifié en §0) — **aucune dépendance à `storage`, `core`, ni au reste d'`api`**. C'est délibérément un fichier auteur d'application, pas un fichier framework : c'est exactement la classe qu'un développeur écrirait pour son serveur `ycappuccino-storage` (voir `storage/example/library/books.py`, structurellement identique) et qui doit rester utilisable telle quelle côté navigateur.
-
-Le test `test_models.py` prouve, en CPython pur (donc sans lien avec un vrai Pyodide, mais valide puisque le module ne contient aucun code spécifique à Pyodide) :
-1. Un document JSON tel qu'il sortirait de `ApiClient.get_one("books", "dune")` (donc de l'enveloppe HTTP, donc un `dict` pur) peut construire un `Book` : `Book(document)` puis `book.on_read(False)` (même séquence que `ycappuccino.storage.manager.Manager.get_one`, cf. `storage/src/main/python/ycappuccino/storage/manager.py`).
-2. `book.get_storage_model()` redonne le document d'origine (round-trip).
-3. Le test enchaîne réellement `ApiClient` (avec un `FakeTransport` renvoyant l'enveloppe JSON) -> `Book` -> `get_storage_model()`, pour prouver la chaîne complète "récupéré par HTTP -> modèle partagé" sans jamais avoir besoin d'un vrai serveur ni d'un vrai navigateur.
-
-## 4. Emballage : deux paquets, une seule intention
-
-| Partie | Nature | Où |
-|---|---|---|
-| `ycappuccino.client.http` (+ `pyodide_transport`) | paquet Python pur, `uv_build`, testable en CPython | `client/src/main/python/ycappuccino/client/` |
-| `client/example/library/books.py` | modèle `@Item` d'exemple, pas empaqueté dans le wheel (dossier `example/`, comme les autres dépôts) | `client/example/` |
-| `client/static/index.html`, `client/static/main.py` | assets statiques servis par un `Host` (dépôt `hosts`), jamais exécutés ni testés en CPython | `client/static/` |
-
-Ce n'est **pas** un wheel `uv_build` unique contenant les assets navigateur : `hosts.Host.directory` pointe vers un répertoire de fichiers statiques (HTML/JS/py bruts), pas vers un paquet Python installé. `ycappuccino-client` (le wheel) et `client/static/` (les assets) ont des cycles de vie et des consommateurs différents : le premier est `pip`/`uv`-installable et testé par `unittest` ; le second est copié/servi tel quel par un `Host`.
-
-`pyproject.toml` déclare `ycappuccino-api`/`ycappuccino-core` comme sources locales éditables, **exactement comme les dépôts voisins** (`storage`, `http_server`, `swagger`...). Ce choix pull `iPOPO`/`jsonrpclib-pelix`/`PyYAML` dans le `.venv` de développement du client (§0, deuxième constat) — **sans conséquence** puisque ce `.venv` ne sert qu'à exécuter `unittest` en CPython sur la machine du développeur, jamais à produire ce qui tourne dans le navigateur. Le bootstrap navigateur (§5) est un chemin d'installation entièrement différent (`micropip.install(url, deps=False)`), qui n'installe explicitement que le code, pas les dépendances déclarées.
-
-## 5. `static/index.html` + `static/main.py` : ce qu'ils font, ce qui n'est pas vérifié
-
-Objectif : la démo la plus petite et la plus évidemment correcte par lecture, pas un exemple riche.
-
-- `index.html` charge pyscript depuis un CDN, épinglé explicitement : `https://pyscript.net/releases/2024.11.1/core.js` (+ `core.css`). Convention alignée sur celle déjà présente dans le dépôt `swagger` (`ui.py`), qui épingle aussi une version exacte sur un CDN (`unpkg.com/swagger-ui-dist@4.5.0`) plutôt qu'un `@latest`.
-- `main.py` (chargé en `<script type="py" src="./main.py">`) : appelle `pyodide.http.pyfetch("/api/items")`, parse l'enveloppe JSON, écrit la liste des items (`id`/`plural`) dans un `<ul id="items">` du DOM via `pyscript.document`/`js.document`. Ne dépend pas du paquet `ycappuccino-client` (pour rester lisible et autonome) ; un commentaire du fichier explique comment le brancher sur `ApiClient` une fois les wheels installées via `micropip.install(..., deps=False)`.
-- **Non vérifiable ici** (pas de réseau, pas de navigateur réel) : que le CDN répond, que la version épinglée existe encore, que `pyscript.document`/`js` exposent l'API attendue dans cette release, que le fetch same-origin/`CORS` fonctionne face à un vrai `http_server`. **Vérification manuelle en navigateur requise avant toute mise en production.**
-
-## 6. Fichiers
+## 7. Fichiers
 
 ```
 client/
   pyproject.toml
   README.md
-  .gitignore
   docs/superpowers/specs/2026-09-15-client-design.md
   docs/superpowers/plans/2026-09-15-client.md
-  src/main/python/ycappuccino/client/__init__.py
-  src/main/python/ycappuccino/client/http.py
-  src/main/python/ycappuccino/client/pyodide_transport.py
-  src/unittest/python/fake_transport.py
-  src/unittest/python/test_http.py
-  src/unittest/python/test_models.py
-  src/unittest/python/test_readme.py
-  example/library/__init__.py
-  example/library/books.py
-  static/index.html
-  static/main.py
+  src/main/python/ycappuccino/client/
+    __init__.py
+    transport.py                    # HttpTransport, IHttpFetcher, RawResponse, decode_envelope
+    pyodide_transport.py            # pyfetch, import pyodide paresseux
+    remote_crud.py                  # RemoteCrud(ICrud)
+    remote_drafts.py                # RemoteDrafts(IDrafts)
+    remote_item_catalog.py          # RemoteItemCatalog(IItemCatalog)
+    remote_service_endpoint.py      # RemoteServiceEndpoint(IServiceEndpoint)
+  src/unittest/python/
+    fake_fetcher.py, fake_catalog.py
+    test_transport.py
+    test_remote_crud.py, test_remote_drafts.py, test_remote_item_catalog.py, test_remote_service_endpoint.py
+    test_client_framework.py        # vrai Framework, vrai bundle_prefix incluant ycappuccino.client
+    test_models.py, test_readme.py
+  example/library/
+    __init__.py, books.py, catalog.py
+  static/
+    index.html, main.py
 ```
 
-## 7. Développer
+## 8. Tests : ce qui est réellement prouvé
 
-```bash
-uv sync
-uv run python -m unittest discover -s src/unittest/python
-```
-
-Rien dans `static/` n'est exécuté par cette commande : c'est attendu, ce sont des assets navigateur, pas du code Python testable ici.
+- **Unitaire, par composant, sans framework** (`test_transport.py`, `test_remote_*.py`) : chaque `Remote*`/`HttpTransport` construit directement avec un faux `IHttpFetcher`/une fausse `IItemCatalog`, aucune dépendance à Pyodide ni au réseau — même style que `test_http.py` en v1, adapté à la nouvelle forme des composants.
+- **Intégration, vrai framework** (`test_client_framework.py`) : `Framework()` réel, `bundle_prefix: [PACKAGE, "ycappuccino.client"]` — **`ycappuccino.client` lui-même**, jamais une construction manuelle de `RemoteCrud`/etc. — plus un composant `Demo` de l'application de test dépendant de `ICrud`/`IItemCatalog`/`IServiceEndpoint` avec **zéro** référence à `ycappuccino.client`. Seul le tout dernier maillon (l'appel HTTP bas niveau) est remplacé, par un faux `IHttpFetcher` publié dans `PACKAGE` (listé avant `ycappuccino.client`, §2 A.4). C'est la preuve la plus forte possible sans navigateur réel : la résolution DI complète (`ICrud`/`IItemCatalog`/`IServiceEndpoint` → `RemoteCrud`/`RemoteItemCatalog`/`RemoteServiceEndpoint`, elles-mêmes dépendant du vrai `HttpTransport`) fonctionne réellement dans le vrai Pelix/iPOPO.
+- **`test_readme.py`** : rejoue les exemples du README exécutables en CPython (composant `Catalog`/`Login` câblés à la main avec de faux transports, round-trip `Book`).
+- **Non prouvé, ne pouvant pas l'être ici** : tout ce qui touche à un vrai Pyodide/navigateur — §0bis in extenso.
