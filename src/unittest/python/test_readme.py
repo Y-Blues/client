@@ -18,9 +18,7 @@ from library.catalog import Catalog  # noqa: E402
 
 from fake_catalog import FakeItemCatalog  # noqa: E402
 from fake_fetcher import FakeFetcher  # noqa: E402
-from ycappuccino.client.remote_crud import RemoteCrud  # noqa: E402
-from ycappuccino.client.remote_item_catalog import RemoteItemCatalog  # noqa: E402
-from ycappuccino.client.remote_service_endpoint import RemoteServiceEndpoint  # noqa: E402
+from ycappuccino.client.components import RemoteCrud, RemoteItemCatalog, RemoteServiceEndpoint  # noqa: E402
 from ycappuccino.client.transport import HttpTransport  # noqa: E402
 
 BOOK_ITEM = {

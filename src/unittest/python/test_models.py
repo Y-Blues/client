@@ -20,7 +20,7 @@ from library.books import Book  # noqa: E402
 
 from fake_catalog import FakeItemCatalog  # noqa: E402
 from fake_fetcher import FakeFetcher  # noqa: E402
-from ycappuccino.client.remote_crud import RemoteCrud  # noqa: E402
+from ycappuccino.client.components import RemoteCrud  # noqa: E402
 from ycappuccino.client.transport import HttpTransport  # noqa: E402
 
 DUNE = {"_id": "dune", "title": "Dune", "pages": 412}
