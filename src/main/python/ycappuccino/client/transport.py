@@ -26,11 +26,16 @@ injectable dependency type, not just the ones declared in ycappuccino.api). Prod
 publishes one: HttpTransport then falls back to the lazily-imported
 ycappuccino.client.pyodide_transport.pyodide_transport, the only place that ever imports
 `pyodide` (inside a function, never at module level - see that module's docstring for what is
-NOT verified about it in this sandbox). Tests publish a fake IHttpFetcher instead, which lets
-the real framework's DI wire a fake HTTP layer under a genuinely real HttpTransport/RemoteCrud/...
-chain (see test_client_framework.py) - or, for plain component-level unit tests, construct
-HttpTransport directly with a hand-written fetcher, no framework involved at all (see
-core/README.md "Tester ses composants").
+NOT verified about it in this sandbox).
+
+Component-level unit tests (test_transport.py, test_remote_*.py) construct HttpTransport
+directly with a hand-written IHttpFetcher, no framework involved at all (see core/README.md
+"Tester ses composants") - this is safe and exercises IHttpFetcher for real. The real-framework
+integration test (test_client_framework.py) does NOT publish an IHttpFetcher component, on
+purpose: see IHttpFetcher's own docstring below for a real, discovered-not-hypothetical
+namespace-package DI quirk that makes that mechanism unreliable specifically for
+ycappuccino.client - it monkeypatches ycappuccino.client.pyodide_transport.pyodide_transport
+directly instead.
 """
 
 import json
@@ -72,12 +77,28 @@ class RawResponse:
 class IHttpFetcher(YCappuccinoComponent, ABC):
     """
     low-level HTTP transport used by HttpTransport when one is published. Not required: with
-    none published, HttpTransport falls back to pyodide_transport.pyodide_transport. Exists so
-    tests can swap in a fake HTTP layer through real DI (publish a fake implementation, list its
-    package before ycappuccino.client in bundle_prefix so it validates first - see
-    test_client_framework.py) instead of a real network call, without hand-constructing
-    HttpTransport/RemoteCrud/... - the same trick this codebase already uses elsewhere for
-    "no hot reload" components (see hosts/README.md "Un seul servlet, plusieurs montages").
+    none published, HttpTransport falls back to pyodide_transport.pyodide_transport.
+
+    KNOWN FRAGILITY, discovered while writing test_client_framework.py, not a hypothetical: this
+    is an Optional[IHttpFetcher] dependency, and HttpTransport lives in the "ycappuccino.*"
+    namespace package. Publishing a fake IHttpFetcher from a temporary test package listed
+    BEFORE ycappuccino.client in bundle_prefix (the pattern this docstring used to recommend)
+    was found, by direct instrumentation, to leave HttpTransport's fetcher permanently None even
+    though the fake service was independently confirmed present and discoverable in the Pelix
+    registry at HttpTransport's own construction time. This reproduces the EXACT same quirk
+    hosts/src/main/python/ycappuccino/hosts/servlet.py's own docstring already documents: "an
+    optional dependency satisfied elsewhere in the same multi-path 'ycappuccino.*' namespace
+    package was observed to resolve non-deterministically (sometimes None) depending on scan
+    timing". hosts' fix (make the dependency mandatory) is not available here (HttpTransport
+    must default to no fetcher in real deployments). Confirmed NOT to reproduce when the
+    provider and consumer are both plain, non-namespace-package modules, or both live in the
+    SAME temporary test package - only the cross-("ycappuccino" namespace package)-boundary case
+    fails. Net effect: publishing a real IHttpFetcher component from an application package is
+    NOT proven reliable by anything in this repository, and test_client_framework.py does NOT
+    use this mechanism (it monkeypatches ycappuccino.client.pyodide_transport.pyodide_transport
+    directly instead - see that test's docstring). IHttpFetcher is kept as a documented
+    extension point and is still exercised safely by test_transport.py, entirely in-process
+    (HttpTransport constructed directly, no Pelix involved) where this quirk cannot occur.
     """
 
     @abstractmethod

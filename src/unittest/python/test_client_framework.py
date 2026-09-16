@@ -4,29 +4,49 @@ CPython, with bundle_prefix listing "ycappuccino.client" itself (not a hand-cons
 RemoteCrud/RemoteItemCatalog/RemoteServiceEndpoint) plus a small application package. The
 application's own Demo component depends on ICrud/IItemCatalog/IServiceEndpoint - the plain api
 interfaces, exactly as it would on a real backend - with ZERO reference to ycappuccino.client's
-classes: this is the proof that "include ycappuccino.client in bundle_prefix" is enough to make
-those interfaces resolve to RemoteCrud/RemoteItemCatalog/RemoteServiceEndpoint through real
-Pelix/iPOPO DI, the same ergonomics as "include ycappuccino.storage" giving a working IManager for
-free (core/README.md).
+classes (not even the fact that Remote* are synthesized by reflection, see remote_proxy.py):
+this is the proof that "include ycappuccino.client in bundle_prefix" is enough to make those
+interfaces resolve to RemoteCrud/RemoteItemCatalog/RemoteServiceEndpoint (ycappuccino.client
+.components) through real Pelix/iPOPO DI, with a REAL, introspectable, exec-forged __init__
+(see remote_proxy.py's _build_init and design spec §9.2) - the same ergonomics as "include
+ycappuccino.storage" giving a working IManager for free (core/README.md).
 
-Only the bottom of the chain is faked: the application package also publishes a
-ycappuccino.client.transport.IHttpFetcher component (FakeFetcher) so HttpTransport never attempts
-a real pyodide.http.pyfetch call (this test runs in plain CPython, not Pyodide) - see
-ycappuccino.client.transport's docstring for why this works reliably: PACKAGE is listed BEFORE
-ycappuccino.client in bundle_prefix, so FakeFetcher is already a registered service before
-HttpTransport (an Optional[IHttpFetcher] dependency) validates - Framework.load_bundles installs
-and validates bundles package by package, in bundle_prefix order (the exact same ordering
-guarantee hosts/scheduler's own framework tests rely on, see their READMEs/tests). Everything
-above HttpTransport (RemoteCrud, RemoteDrafts, RemoteItemCatalog, RemoteServiceEndpoint, and the
-Demo component's own DI) is 100% real: real Pelix bundles, real constructor injection, real
-async_runner bridging - only the raw HTTP call is replaced by a Python object returning canned
-bytes.
+FAKING THE TRANSPORT - A REAL BUG DISCOVERED WHILE WRITING THIS TEST, NOT A HYPOTHETICAL:
+the first version of this test published a fake ycappuccino.client.transport.IHttpFetcher
+component from PACKAGE (listed before ycappuccino.client in bundle_prefix, exactly like the
+Optional[IHttpFetcher] mechanism ycappuccino.client.transport.HttpTransport was designed
+around). It failed DETERMINISTICALLY (confirmed via direct instrumentation of
+HttpTransport.__init__: fetcher=None every single time), even though the fake fetcher's service
+was independently confirmed present and discoverable in the registry at that exact moment
+(framework.context.get_service_reference("IHttpFetcher") found it). Isolated by elimination
+(minimal repros with a hand-written Optional[IThing] consumer/provider pair): the bug reproduces
+ONLY when the consumer (HttpTransport) lives in the "ycappuccino.*" namespace package while the
+provider lives in a temporary test package - the EXACT SAME quirk hosts/servlet.py's own
+docstring already documents ("an optional dependency satisfied elsewhere in the same multi-path
+'ycappuccino.*' namespace package was observed to resolve non-deterministically (sometimes None)
+depending on scan timing"). hosts' own fix was to make the dependency mandatory instead; that is
+not an option here (HttpTransport's fetcher must default to none in real deployments). Fix used
+here instead: bypass Pelix DI entirely for the fake transport - monkeypatch the plain module-level
+function HttpTransport falls back to (ycappuccino.client.pyodide_transport.pyodide_transport) with
+plain Python attribute assignment, BEFORE starting the framework. HttpTransport.request() does
+`from ycappuccino.client.pyodide_transport import pyodide_transport` freshly on every call (never
+importing it at module level, see that module's docstring), so it picks up whatever function
+object is bound to that name at CALL time - a plain, single-threaded, GIL-protected attribute
+read/write, with none of Pelix's cross-namespace-package service-registry timing involved. This
+also means ycappuccino.client.transport.IHttpFetcher (kept in the code as a documented, but now
+KNOWN-FRAGILE-ACROSS-NAMESPACE-PACKAGES, extension point - see its docstring and design spec §9.4)
+is NOT exercised by this test; it IS exercised by test_transport.py, entirely in-process, with no
+Pelix involved at all, where this quirk cannot occur.
 """
 
+import json
 import unittest
 
 from ycappuccino.core.framework import Framework
 from ycappuccino.core.testing import TemporaryApplication, wait_until
+
+# plain CPython import: ycappuccino.client.transport never imports pelix/pyodide at module level.
+from ycappuccino.client.transport import RawResponse
 
 APPLICATION = {
     "conf/application.yml": """
@@ -38,55 +58,7 @@ APPLICATION = {
           shell:
             console: false
     """,
-    # PACKAGE (FakeFetcher, Demo) is scanned before ycappuccino.client: see this file's docstring
-    # and ycappuccino.client.transport's docstring for why that ordering matters here (it does
-    # not for Demo's own ICrud/IItemCatalog/IServiceEndpoint dependencies, which are mandatory and
-    # so are resolved whenever they become available, regardless of scan order - only
-    # HttpTransport's *optional* fetcher dependency is sensitive to it).
     "PACKAGE/__init__.py": "",
-    "PACKAGE/fake_fetcher.py": """
-        import json
-
-        from ycappuccino.client.transport import IHttpFetcher, RawResponse
-
-        BOOK = {
-            "id": "book", "plural": "books", "app": "library", "module": "library.books",
-            "secure_read": False, "secure_write": False, "writable": True, "multipart": False,
-            "refs": [],
-        }
-
-
-        class FakeFetcher(IHttpFetcher):
-            requests = []
-
-            def __init__(self):
-                pass
-
-            async def start(self):
-                pass
-
-            async def stop(self):
-                pass
-
-            async def fetch(self, method, url, headers, body):
-                FakeFetcher.requests.append((method, url))
-                path = url.split("?", 1)[0]
-                if path == "/api/items":
-                    payload = {"status": 200, "meta": {"type": "array", "size": 1}, "data": [BOOK]}
-                elif path == "/api/crud/books/dune":
-                    payload = {
-                        "status": 200, "meta": {"type": "object", "size": 1},
-                        "data": {"_id": "dune", "title": "Dune"},
-                    }
-                elif path == "/api/services/echo":
-                    payload = {
-                        "status": 200, "meta": {"type": "object", "size": 1},
-                        "data": {"echo": json.loads(body) if body else None},
-                    }
-                else:
-                    payload = {"status": 404, "meta": {"type": "object"}, "data": {"error": "not found"}}
-                return RawResponse(status=payload["status"], headers={}, body=json.dumps(payload).encode())
-    """,
     "PACKAGE/demo.py": """
         from ycappuccino.api.core_base import YCappuccinoComponent
         from ycappuccino.api.endpoints_service import IServiceEndpoint
@@ -114,11 +86,48 @@ APPLICATION = {
     """,
 }
 
+BOOK = {
+    "id": "book", "plural": "books", "app": "library", "module": "library.books",
+    "secure_read": False, "secure_write": False, "writable": True, "multipart": False, "refs": [],
+}
+
+
+class FakeRequestLog:
+    """records every (method, path) HttpTransport's fallback fetch is asked to perform"""
+
+    calls: list = []
+
+
+async def _fake_pyodide_transport(method, url, headers, body):
+    FakeRequestLog.calls.append((method, url))
+    path = url.split("?", 1)[0]
+    if path == "/api/items":
+        payload = {"status": 200, "meta": {"type": "array", "size": 1}, "data": [BOOK]}
+    elif path == "/api/crud/books/dune":
+        payload = {
+            "status": 200, "meta": {"type": "object", "size": 1},
+            "data": {"_id": "dune", "title": "Dune"},
+        }
+    elif path == "/api/services/echo":
+        payload = {
+            "status": 200, "meta": {"type": "object", "size": 1},
+            "data": {"echo": json.loads(body) if body else None},
+        }
+    else:
+        payload = {"status": 404, "meta": {"type": "object"}, "data": {"error": "not found"}}
+    return RawResponse(status=payload["status"], headers={}, body=json.dumps(payload).encode())
+
 
 class TestClientInFramework(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        import ycappuccino.client.pyodide_transport as pyodide_transport_module
+
+        cls._original_pyodide_transport = pyodide_transport_module.pyodide_transport
+        pyodide_transport_module.pyodide_transport = _fake_pyodide_transport
+        cls.addClassCleanup(setattr, pyodide_transport_module, "pyodide_transport", cls._original_pyodide_transport)
+
         cls.app = TemporaryApplication(APPLICATION).open()
         cls.addClassCleanup(cls.app.close)
         cls.framework = Framework()
@@ -147,11 +156,10 @@ class TestClientInFramework(unittest.TestCase):
 
         self.assertEqual(demo_module.Demo.echo_result, {"echo": {"hi": 1}})
 
-    def test_every_call_went_through_the_fake_fetcher_not_a_real_network_call(self):
-        fetcher_module = self.app.module("fake_fetcher")
-        wait_until(lambda: len(fetcher_module.FakeFetcher.requests) >= 3, timeout=15.0)
+    def test_every_call_went_through_the_fake_transport_not_a_real_network_call(self):
+        wait_until(lambda: len(FakeRequestLog.calls) >= 3, timeout=15.0)
 
-        paths = [path for _, path in fetcher_module.FakeFetcher.requests]
+        paths = [path for _, path in FakeRequestLog.calls]
         self.assertIn("/api/items", paths)
         self.assertIn("/api/crud/books/dune", paths)
         self.assertIn("/api/services/echo", paths)
