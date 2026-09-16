@@ -7,19 +7,23 @@ subclasses exactly as if they had been written by hand in this file - the moment
 includes "ycappuccino.client", app code gets working ICrud/IDrafts/IItemCatalog/IServiceEndpoint
 implementations with zero code of its own naming this module.
 
-"crud"/"drafts"/"items"/"services" are the one deliberate per-interface datum this design keeps
-(the HTTP mount prefix - see spec §9.1 for why this one fact cannot be derived by reflection and
-is not the declarative route table the user asked to eliminate). catalog=IItemCatalog is the
-extra constructor dependency RemoteCrud/RemoteDrafts need to resolve item_id -> plural (spec §9.3);
-it resolves, through the real DI container, to RemoteItemCatalog below - itself auto-discovered
-the same way, with no explicit wiring anywhere.
+This module is the UNCONDITIONAL fallback: always all four, regardless of what the backend
+actually has loaded - exactly today's pre-discovery behaviour, byte-for-byte unchanged (see
+discovery.py's own module docstring, §10 of the spec, for the discovery-GATED alternative used
+when a backend exposes "__remote_capabilities__": that path builds a SMALLER, generated sibling
+module instead of this one, and excludes this module from bundle_prefix so the two never both
+register the same interface).
+
+known_interfaces.KNOWN_INTERFACES is the single, well-documented table both this module and
+discovery.py build their Remote* classes from (added to make the table itself trivially
+extensible, spec §10; this loop replaces four hand-written module-level assignments with
+equivalent generated ones - same classes, same names, same make_remote() calls, in the same
+order - no behavioural change, verified by the pre-existing test suite, unmodified).
 """
 
-from ycappuccino.api.endpoints_service import IServiceEndpoint
-from ycappuccino.api.endpoints_storage import ICrud, IDrafts, IItemCatalog
+from ycappuccino.client.known_interfaces import KNOWN_INTERFACES, remote_class_name
 from ycappuccino.client.remote_proxy import make_remote
 
-RemoteCrud = make_remote(ICrud, "crud", catalog=IItemCatalog)
-RemoteDrafts = make_remote(IDrafts, "drafts", catalog=IItemCatalog)
-RemoteItemCatalog = make_remote(IItemCatalog, "items")
-RemoteServiceEndpoint = make_remote(IServiceEndpoint, "services")
+for _interface, _resource, _extra_deps in KNOWN_INTERFACES:
+    globals()[remote_class_name(_interface)] = make_remote(_interface, _resource, **_extra_deps)
+del _interface, _resource, _extra_deps
