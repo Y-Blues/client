@@ -10,7 +10,12 @@
 # letting micropip pull in iPOPO/jsonrpclib-pelix's own transitive resolution - see the design
 # spec Sec.0's second empirical finding, still valid), write conf/application.yml and the demo
 # bundle into Pyodide's in-memory virtual filesystem (risk (c) - Framework.init() wants a real
-# file path; core.framework is NOT modified to accept anything else), start a REAL
+# file path; core.framework is NOT modified to accept anything else), DISCOVER which api-level
+# interfaces the backend actually has loaded (spec §10, ycappuccino.client.discovery - a
+# best-effort call to a conventionally-named "__remote_capabilities__" service, gracefully
+# degrading to today's unconditional four Remote* if it fails) and write that decision into an
+# ordinary generated Python module BEFORE the framework ever starts (sidesteps core/README.md's
+# "Piège de timing" entirely - see discovery.py's own module docstring), start a REAL
 # ycappuccino.core.framework.Framework, and read back the DI-resolved Catalog component.
 #
 # THIS WILL NOT WORK under a standard single-threaded Pyodide build: Framework.init() starts
@@ -66,11 +71,48 @@ async def _install_wheels():
         await micropip.install(wheel, deps=False)
 
 
+async def _discover_backend_components():
+    """
+    Design spec §10 (docs/superpowers/specs/2026-09-15-client-design.md): runs BEFORE
+    Framework().init() is ever called, using the same discovery.py this repo's own real-framework
+    integration test exercises (test_client_discovery_framework.py) - no fetcher is passed, so
+    discover_backend_provides() falls through to the SAME production path every other Remote* call
+    already uses (HttpTransport.request()'s lazy `from ycappuccino.client.pyodide_transport import
+    pyodide_transport`, see that module's docstring for what is NOT verified about it here).
+
+    Writes bundle/generated_remote.py - a bare top-level module (not nested inside bundle/library),
+    so its own position in bundle_prefix is unambiguous (pkgutil.walk_packages's WITHIN-a-package
+    ordering is unspecified; a top-level module's position in bundle_prefix's own, explicitly
+    ordered list is not - see design spec §10 and the empirical ordering bug this file's own test
+    suite hit and documented while first getting this working). NOT executed anywhere in this
+    sandbox (no network, no Pyodide) - MANUAL BROWSER VERIFICATION REQUIRED, same caveat as every
+    other step of this bootstrap.
+    """
+    from ycappuccino.client import discovery
+
+    resources = await discovery.prepare_generated_module("bundle/generated_remote.py")
+    _set_status(f"backend capabilities: {', '.join(resources) or '(none discovered - using defaults)'}")
+
+
 def _write_application():
     """
     Framework.init(yml_path) wants a real file path (risk (c)): write conf/application.yml and
     the demo bundle into Pyodide's in-memory virtual filesystem with plain open(path, "w") -
     Pyodide's FS supports this transparently, no change to core.framework needed or made.
+
+    bundle_prefix lists "ycappuccino.client.transport" (HttpTransport - never conditional) and
+    "generated_remote" (§10's discovery-gated codegen, written by _discover_backend_components()
+    just before this runs) INSTEAD OF the whole "ycappuccino.client" package: "ycappuccino.client
+    .components" (the unconditional four, still used when the app doesn't opt into discovery - see
+    README.md) must NOT also be scanned here, or it would register a second, unconditional
+    implementation of every interface alongside generated_remote.py's discovery-gated ones and
+    collide - see discovery.py's own module docstring. "ycappuccino.client.transport" is listed
+    FIRST: generated_remote.py's Remote* have a REQUIRED `transport: HttpTransport` constructor
+    dependency (remote_proxy.py) that must already be installed before them, and "generated_remote"
+    is listed BEFORE "library": Catalog (library/catalog.py) depends on ICrud/IItemCatalog directly
+    (non-optional) so it can only validate once they exist - see
+    test_client_discovery_framework.py for the exact same ordering requirement, verified against a
+    real framework.
     """
     import os
 
@@ -81,7 +123,8 @@ def _write_application():
         file.write(
             "name: browser\n"
             "bundle_prefix:\n"
-            "  - ycappuccino.client\n"
+            "  - ycappuccino.client.transport\n"
+            "  - generated_remote\n"
             "  - library\n"
         )
 
@@ -105,6 +148,9 @@ async def main():
 
         _set_status("writing application files...")
         _write_application()
+
+        _set_status("discovering backend capabilities...")
+        await _discover_backend_components()
 
         import sys
 
