@@ -38,7 +38,20 @@ bundle_prefix:
   - myapp
 ```
 
-Lister `ycappuccino.client` dans `bundle_prefix` suffit à faire résoudre `ICrud`/`IDrafts`/`IItemCatalog`/`IServiceEndpoint` vers `RemoteCrud`/`RemoteDrafts`/`RemoteItemCatalog`/`RemoteServiceEndpoint` — exactement la même ergonomie que `ycappuccino.storage` donnant un `IManager` fonctionnel, ou `ycappuccino.endpoints_service` un `IServiceEndpoint`. Dans le navigateur, il n'existe aucune autre implémentation de ces interfaces (pas de vraie logique métier locale) : la résolution Pelix/iPOPO — un mécanisme de DI générique, pas un mécanisme spécial pour ce dépôt — ne trouve que celle-ci. `RemoteCrud`, `RemoteDrafts`, `RemoteItemCatalog`, `RemoteServiceEndpoint` et `HttpTransport` (`ycappuccino.client.remote_crud`/`remote_drafts`/`remote_item_catalog`/`remote_service_endpoint`/`transport`) restent des détails d'implémentation internes : importables pour les tests, jamais nommés par du code applicatif.
+Lister `ycappuccino.client` dans `bundle_prefix` suffit à faire résoudre `ICrud`/`IDrafts`/`IItemCatalog`/`IServiceEndpoint` vers `RemoteCrud`/`RemoteDrafts`/`RemoteItemCatalog`/`RemoteServiceEndpoint` — exactement la même ergonomie que `ycappuccino.storage` donnant un `IManager` fonctionnel, ou `ycappuccino.endpoints_service` un `IServiceEndpoint`. Dans le navigateur, il n'existe aucune autre implémentation de ces interfaces (pas de vraie logique métier locale) : la résolution Pelix/iPOPO — un mécanisme de DI générique, pas un mécanisme spécial pour ce dépôt — ne trouve que celle-ci. `RemoteCrud`, `RemoteDrafts`, `RemoteItemCatalog`, `RemoteServiceEndpoint` et `HttpTransport` (`ycappuccino.client.components`/`transport`) restent des détails d'implémentation internes : importables pour les tests, jamais nommés par du code applicatif.
+
+### Comment les quatre `Remote*` existent, sans être écrits à la main
+
+`ycappuccino/client/components.py` contient exactement ceci :
+
+```python
+RemoteCrud = make_remote(ICrud, "crud", catalog=IItemCatalog)
+RemoteDrafts = make_remote(IDrafts, "drafts", catalog=IItemCatalog)
+RemoteItemCatalog = make_remote(IItemCatalog, "items")
+RemoteServiceEndpoint = make_remote(IServiceEndpoint, "services")
+```
+
+`make_remote` (`ycappuccino.client.remote_proxy`) synthétise chaque classe **par réflexion** sur l'interface `api` — aucune méthode écrite à la main, aucune table `{méthode → route}` : le verbe HTTP, le chemin et la forme du résultat sont dérivés du **nom** de chaque méthode et des **noms** de ses paramètres, selon cinq conventions précises documentées dans la spec, [§9](docs/superpowers/specs/2026-09-15-client-design.md#9-v3--make_remote-fabrique-générique-par-réflexion) — y compris leurs limites honnêtes (un nom de méthode mal choisi sur une future interface pourrait être mal routé sans qu'aucun test ne puisse le prédire à l'avance). Demandé et choisi explicitement par l'utilisateur (réflexion pure plutôt qu'une table déclarative), avec la fragilité assumée en connaissance de cause.
 
 ## Mise en place
 
@@ -99,9 +112,11 @@ class Login(YCappuccinoComponent):
 
 `HttpTransport` n'importe jamais `pyodide` au niveau module. Sans `IHttpFetcher` publié, il utilise `ycappuccino.client.pyodide_transport.pyodide_transport`, qui importe `pyodide.http` **à l'intérieur de la fonction** : hors Pyodide, l'appel lève un `RuntimeError` explicite plutôt qu'un `ModuleNotFoundError` muet.
 
-`IHttpFetcher` (`ycappuccino.client.transport`) est une interface de composant **définie dans ce dépôt**, pas dans `api` : `describe_component` accepte n'importe quel sous-type de `YCappuccinoComponent` comme dépendance injectable, ce n'est pas réservé aux interfaces déclarées dans `api`. En pratique, aucune implémentation n'est publiée en production (`HttpTransport` retombe alors sur `pyodide_transport`) ; les tests d'intégration (`test_client_framework.py`) en publient une fausse, ce qui permet de faire tourner **tout** le reste — `RemoteCrud`, `RemoteItemCatalog`, `RemoteServiceEndpoint`, l'injection de constructeur — via le vrai framework, en CPython, sans jamais toucher au réseau ni à Pyodide.
+`IHttpFetcher` (`ycappuccino.client.transport`) est une interface de composant **définie dans ce dépôt**, pas dans `api` : `describe_component` accepte n'importe quel sous-type de `YCappuccinoComponent` comme dépendance injectable, ce n'est pas réservé aux interfaces déclarées dans `api`. En pratique, aucune implémentation n'est publiée en production (`HttpTransport` retombe alors sur `pyodide_transport`).
 
-Pour les tests unitaires d'un seul composant (pas de framework du tout, voir `core/README.md` « Tester ses composants »), on construit directement `HttpTransport(fetcher=FakeFetcher(...))`.
+Pour les tests unitaires d'un seul composant (pas de framework du tout, voir `core/README.md` « Tester ses composants »), on construit directement `HttpTransport(fetcher=FakeFetcher(...))` — ceci **est** prouvé, exhaustivement, par `test_transport.py`/`test_remote_*.py`.
+
+**Découverte réelle en écrivant le test d'intégration, pas une supposition** : publier un `IHttpFetcher` depuis un paquet applicatif (pour que le vrai framework le câble automatiquement dans `HttpTransport`) ne fonctionne **pas de façon fiable** dès que `HttpTransport` vit dans l'espace de noms `ycappuccino.*` et le fournisseur ailleurs — le même défaut que `hosts/servlet.py` documente déjà pour ses propres dépendances optionnelles. Voir spec §9.2 pour le diagnostic complet. `test_client_framework.py` contourne donc le problème autrement : il remplace directement `ycappuccino.client.pyodide_transport.pyodide_transport` (une simple affectation de fonction Python, aucun passage par la résolution de services Pelix) plutôt que de publier un `IHttpFetcher`.
 
 ## Modèle partagé, round-trip complet
 
@@ -155,7 +170,7 @@ Rien de ce qui touche un navigateur réel n'a pu être exécuté dans l'environn
 - **COOP/COEP + CDN tiers** (risque (e)) : qu'un CDN public pyscript/Pyodide envoie des en-têtes compatibles avec `Cross-Origin-Embedder-Policy: require-corp` une fois ce mode activé sur le `Host`.
 - **La construction réelle des wheels** `ycappuccino-api`/`ycappuccino-core`/`ycappuccino-client` et leur mise à disposition par un `Host` : non faite ici (hors réseau/index de paquets réel).
 
-Ce qui **est** prouvé, par exécution réelle dans ce bac à sable : le câblage DI complet en CPython pur (`test_client_framework.py` — un vrai `Framework()`, un vrai scan `bundle_prefix` incluant `ycappuccino.client`, une vraie résolution `ICrud`/`IItemCatalog`/`IServiceEndpoint` → `RemoteCrud`/`RemoteItemCatalog`/`RemoteServiceEndpoint`, seul le dernier maillon — l'appel HTTP bas niveau — étant remplacé par un faux `IHttpFetcher`), le comportement unitaire de chaque `Remote*`/`HttpTransport`/`decode_envelope` avec un transport falsifié, et le round-trip `document -> Book -> get_storage_model()`.
+Ce qui **est** prouvé, par exécution réelle dans ce bac à sable : le câblage DI complet en CPython pur (`test_client_framework.py` — un vrai `Framework()`, un vrai scan `bundle_prefix` incluant `ycappuccino.client`, une vraie résolution `ICrud`/`IItemCatalog`/`IServiceEndpoint` → `RemoteCrud`/`RemoteItemCatalog`/`RemoteServiceEndpoint` avec leur vrai `__init__` forgé par `exec` — seul le dernier maillon, l'appel HTTP bas niveau, étant remplacé par une fonction falsifiée, voir « Transport bas niveau » ci-dessus pour pourquoi ce n'est pas un `IHttpFetcher` publié), le comportement unitaire exhaustif (un test par méthode, verbe/chemin/corps/query exacts) de chaque `Remote*`/`HttpTransport`/`decode_envelope` avec un transport falsifié, et le round-trip `document -> Book -> get_storage_model()`.
 
 ## Développer client
 
