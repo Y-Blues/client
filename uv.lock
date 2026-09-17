@@ -406,24 +406,28 @@ source = { editable = "../permissions_app" }
 dependencies = [
     { name = "pyjwt" },
     { name = "ycappuccino-api" },
+    { name = "ycappuccino-client" },
     { name = "ycappuccino-core" },
     { name = "ycappuccino-endpoints-service" },
     { name = "ycappuccino-endpoints-storage" },
     { name = "ycappuccino-storage" },
     { name = "ycappuccino-ui" },
     { name = "ycappuccino-ui-shell" },
+    { name = "ycappuccino-ui-web" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "ycappuccino-api", editable = "../api" },
+    { name = "ycappuccino-client", editable = "." },
     { name = "ycappuccino-core", editable = "../core" },
     { name = "ycappuccino-endpoints-service", editable = "../endpoints_service" },
     { name = "ycappuccino-endpoints-storage", editable = "../endpoints_storage" },
     { name = "ycappuccino-storage", editable = "../storage" },
     { name = "ycappuccino-ui", editable = "../ui" },
     { name = "ycappuccino-ui-shell", editable = "../ui_shell" },
+    { name = "ycappuccino-ui-web", editable = "../ui_web" },
 ]
 
 [[package]]
@@ -493,5 +497,20 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "textual", specifier = ">=0.60" },
+    { name = "ycappuccino-ui", editable = "../ui" },
+]
+
+[[package]]
+name = "ycappuccino-ui-web"
+version = "0.1.0"
+source = { editable = "../ui_web" }
+dependencies = [
+    { name = "ycappuccino-api" },
+    { name = "ycappuccino-ui" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ycappuccino-api", editable = "../api" },
     { name = "ycappuccino-ui", editable = "../ui" },
 ]
