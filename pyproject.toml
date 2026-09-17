@@ -1,11 +1,22 @@
 [project]
 name = "ycappuccino-client"
 version = "0.1.0"
-description = "YCappuccino pyscript client: thin async HTTP client and shared @Item models, usable under Pyodide in the browser or in plain CPython for testing"
+description = "YCappuccino client: the framework in a browser (Pyodide), calling backend services through generated JSON-RPC proxies"
 requires-python = ">=3.10"
 dependencies = [
     "ycappuccino-api",
     "ycappuccino-core",
+]
+
+[dependency-groups]
+# a real backend, started in a subprocess by the end-to-end test
+dev = [
+    "ycappuccino-storage",
+    "ycappuccino-endpoints-storage",
+    "ycappuccino-endpoints-service",
+    "ycappuccino-http-server",
+    "ycappuccino-remote",
+    "ycappuccino-permissions",
 ]
 
 [build-system]
@@ -19,3 +30,11 @@ module-root = "src/main/python"
 [tool.uv.sources]
 ycappuccino-api = { path = "../api", editable = true }
 ycappuccino-core = { path = "../core", editable = true }
+ycappuccino-storage = { path = "../storage", editable = true }
+ycappuccino-endpoints-storage = { path = "../endpoints_storage", editable = true }
+ycappuccino-endpoints-service = { path = "../endpoints_service", editable = true }
+ycappuccino-http-server = { path = "../http_server", editable = true }
+ycappuccino-remote = { path = "../remote", editable = true }
+ycappuccino-permissions = { path = "../permissions_app", editable = true }
+ycappuccino-ui = { path = "../ui", editable = true }
+ycappuccino-ui-shell = { path = "../ui_shell", editable = true }

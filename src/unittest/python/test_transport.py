@@ -4,7 +4,7 @@ import unittest
 from fake_fetcher import FakeFetcher
 
 from ycappuccino.api.endpoints_storage import CrudError, Forbidden, InvalidRequest, NotAuthenticated, NotFound
-from ycappuccino.client.transport import HttpTransport, RawResponse, decode_envelope
+from ycappuccino.client.transport import HttpTransport, ISession, RawResponse, decode_envelope
 
 
 class FakeConfiguration:
@@ -91,6 +91,41 @@ class TestHttpTransportRequests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.transport.get_token())
         self.transport.set_token("demo")
         self.assertEqual(self.transport.get_token(), "demo")
+
+
+class TestHttpTransportDispatch(unittest.IsolatedAsyncioTestCase):
+    DISPATCH = "/api/services/__remote_dispatch__/pkg.IInventory/check"
+
+    async def test_posts_the_kwargs_to_remote_dispatch_and_returns_the_result(self):
+        fetcher = FakeFetcher({("POST", self.DISPATCH): (200, {"result": 42})})
+        transport = HttpTransport(fetcher=fetcher)
+        await transport.start()
+
+        result = await transport.dispatch("pkg.IInventory", "check", {"sku": "widget"})
+
+        self.assertEqual(result, 42)
+        _, _, headers, body = fetcher.calls[0]
+        self.assertEqual(json.loads(body), {"kwargs": {"sku": "widget"}})
+        self.assertNotIn("Authorization", headers)
+
+    async def test_carries_the_session_token(self):
+        fetcher = FakeFetcher({("POST", self.DISPATCH): (200, {"result": None})})
+        transport = HttpTransport(fetcher=fetcher)
+        transport.set_token("eyJ")
+
+        await transport.dispatch("pkg.IInventory", "check", {})
+
+        self.assertEqual(fetcher.calls[0][2]["Authorization"], "Bearer eyJ")
+
+    async def test_a_refused_call_raises_the_matching_error(self):
+        fetcher = FakeFetcher({("POST", self.DISPATCH): (403, {"error": "call pkg.IInventory.check is not authorized"})})
+        transport = HttpTransport(fetcher=fetcher)
+
+        with self.assertRaises(Forbidden):
+            await transport.dispatch("pkg.IInventory", "check", {})
+
+    def test_the_transport_is_the_session(self):
+        self.assertTrue(issubclass(HttpTransport, ISession))
 
 
 class TestHttpTransportWithoutFetcherFallsBackToPyodide(unittest.IsolatedAsyncioTestCase):

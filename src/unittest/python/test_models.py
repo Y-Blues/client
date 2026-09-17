@@ -1,6 +1,6 @@
 """
 Proves, in plain CPython (no Pyodide needed: the model code has no Pyodide-specific behaviour),
-that a shared @Item model can be built from a JSON document fetched through RemoteCrud and read
+that a shared @Item model can be built from a JSON document fetched through the ICrud proxy and read
 back with its own get_storage_model(), exactly like ycappuccino.storage.manager.Manager.get_one
 does server-side (create_item(item, document) then model.on_read(False), see
 storage/src/main/python/ycappuccino/storage/manager.py).
@@ -18,7 +18,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "ex
 
 from library.books import Book  # noqa: E402
 
-from fake_catalog import FakeItemCatalog  # noqa: E402
 from fake_fetcher import FakeFetcher  # noqa: E402
 from ycappuccino.client.components import RemoteCrud  # noqa: E402
 from ycappuccino.client.transport import HttpTransport  # noqa: E402
@@ -37,11 +36,12 @@ class TestSharedModelRoundTrip(unittest.TestCase):
 
 
 class TestSharedModelFromRemoteCrud(unittest.IsolatedAsyncioTestCase):
-    async def test_a_document_fetched_through_remote_crud_builds_a_book(self):
-        fetcher = FakeFetcher({("GET", "/api/crud/books/dune"): (200, dict(DUNE))})
+    async def test_a_document_fetched_through_the_crud_proxy_builds_a_book(self):
+        dispatch = "/api/services/__remote_dispatch__/ycappuccino.api.endpoints_storage.ICrud/get_one"
+        fetcher = FakeFetcher({("POST", dispatch): (200, {"result": dict(DUNE)})})
         transport = HttpTransport(fetcher=fetcher)
         await transport.start()
-        crud = RemoteCrud(transport, FakeItemCatalog({"book": "books"}))
+        crud = RemoteCrud(transport)
 
         document = await crud.get_one("book", "dune")
         book = Book(document)

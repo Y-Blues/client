@@ -1,41 +1,15 @@
 """
-HttpTransport: the single native component all Remote* components (RemoteCrud, RemoteDrafts,
-RemoteItemCatalog, RemoteServiceEndpoint) depend on to reach the real ycappuccino-http_server
-backend over HTTP. It owns:
+HttpTransport: the single native component every generated proxy (rpc_proxy.py) depends on to reach the
+backend, and the client's ISession. It owns:
 
-- the base URL ("/api" by default, same-origin: the client is served by the same backend it
-  calls, via a Host - see hosts/README.md), overridable through IConfiguration under the key
-  "client.base_url" (read once, at start() - same "no hot reload" convention as scheduler/hosts);
-- the current bearer token, in memory (set_token/get_token/clear_token) - see the design spec
-  (2026-09-15-client-design.md A.2) for why this lives here rather than in a separate
-  "BrowserSession" component: there is exactly one transport, so there is exactly one place that
-  needs the token, and splitting it into two components would only add a wiring hop for no
-  behavioural gain. A login flow (calling IServiceEndpoint.call("login", ...), see
-  permissions_app/README.md's "Connexion") reads the token out of the response body and calls
-  set_token() on this component;
-- turning a (method, path, params, body) call into a real HTTP request and back into a decoded
-  envelope or a raised endpoints_storage error - decode_envelope() below, adapted from
-  remote/call.py's _translate() (not imported: client must not depend on remote, and remote's
-  peer-registry addressing model does not apply here - one fixed same-origin backend, not a set
-  of named peers).
+- the base URL ("/api" by default: the client is served by the backend it calls, through a Host),
+  overridable through IConfiguration under "client.base_url", read once at start();
+- the current bearer token (set_token/get_token/clear_token), sent with every call;
+- turning a call into an HTTP request and its {"status", "meta", "data"} envelope back into a result or
+  the matching endpoints_storage error (decode_envelope); dispatch() is the JSON-RPC call proxies use.
 
-Low-level fetch is delegated to an IHttpFetcher, a YCappuccinoComponent-rooted interface defined
-in this module (client is free to define its own component interfaces - describe_component()
-in ycappuccino.core.component_factory treats any subclass of YCappuccinoComponent as an
-injectable dependency type, not just the ones declared in ycappuccino.api). Production never
-publishes one: HttpTransport then falls back to the lazily-imported
-ycappuccino.client.pyodide_transport.pyodide_transport, the only place that ever imports
-`pyodide` (inside a function, never at module level - see that module's docstring for what is
-NOT verified about it in this sandbox).
-
-Component-level unit tests (test_transport.py, test_remote_*.py) construct HttpTransport
-directly with a hand-written IHttpFetcher, no framework involved at all (see core/README.md
-"Tester ses composants") - this is safe and exercises IHttpFetcher for real. The real-framework
-integration test (test_client_framework.py) does NOT publish an IHttpFetcher component, on
-purpose: see IHttpFetcher's own docstring below for a real, discovered-not-hypothetical
-namespace-package DI quirk that makes that mechanism unreliable specifically for
-ycappuccino.client - it monkeypatches ycappuccino.client.pyodide_transport.pyodide_transport
-directly instead.
+The low-level fetch goes to an IHttpFetcher when one is given (unit tests), otherwise to
+ycappuccino.client.pyodide_transport.pyodide_transport, the only place importing pyodide.
 """
 
 import json
@@ -79,7 +53,7 @@ class IHttpFetcher(YCappuccinoComponent, ABC):
     low-level HTTP transport used by HttpTransport when one is published. Not required: with
     none published, HttpTransport falls back to pyodide_transport.pyodide_transport.
 
-    KNOWN FRAGILITY, discovered while writing test_client_framework.py, not a hypothetical: this
+    KNOWN FRAGILITY, discovered while writing the framework test, not a hypothetical: this
     is an Optional[IHttpFetcher] dependency, and HttpTransport lives in the "ycappuccino.*"
     namespace package. Publishing a fake IHttpFetcher from a temporary test package listed
     BEFORE ycappuccino.client in bundle_prefix (the pattern this docstring used to recommend)
@@ -95,8 +69,8 @@ class IHttpFetcher(YCappuccinoComponent, ABC):
     SAME temporary test package - only the cross-("ycappuccino" namespace package)-boundary case
     fails. Net effect: publishing a real IHttpFetcher component from an application package is
     NOT proven reliable by anything in this repository, and test_client_framework.py does NOT
-    use this mechanism (it monkeypatches ycappuccino.client.pyodide_transport.pyodide_transport
-    directly instead - see that test's docstring). IHttpFetcher is kept as a documented
+    use this mechanism (it replaces ycappuccino.client.pyodide_transport.pyodide_transport
+    directly instead). IHttpFetcher is kept as a documented
     extension point and is still exercised safely by test_transport.py, entirely in-process
     (HttpTransport constructed directly, no Pelix involved) where this quirk cannot occur.
     """
@@ -107,8 +81,31 @@ class IHttpFetcher(YCappuccinoComponent, ABC):
         unwrapped, exactly like remote/call.py and http_server's own generic-500 handling do"""
 
 
-class HttpTransport(YCappuccinoComponent):
-    """same-origin HTTP transport shared by every Remote* component; see module docstring"""
+class ISession(YCappuccinoComponent, ABC):
+    """
+    the signed-in state of this client: the only client-specific service application code may depend
+    on. Once ILoginService.login() returned a token, set_token() makes every later backend call carry
+    it; the backend derives the caller's subject from it, the client never sends a subject itself.
+    """
+
+    @abstractmethod
+    def set_token(self, token: Optional[str]) -> None:
+        """the token sent with every later call, None to call anonymously"""
+
+    @abstractmethod
+    def get_token(self) -> Optional[str]:
+        """the current token, or None"""
+
+    @abstractmethod
+    def clear_token(self) -> None:
+        """call anonymously from now on"""
+
+
+DISPATCH_PATH = "/services/__remote_dispatch__"
+
+
+class HttpTransport(ISession):
+    """same-origin HTTP transport shared by every generated proxy, and the client's session"""
 
     def __init__(
         self,
@@ -145,7 +142,7 @@ class HttpTransport(YCappuccinoComponent):
     ) -> RawResponse:
         """
         path is relative to the base URL (e.g. "/crud/books/dune", never "/api/crud/..."):
-        HttpTransport owns the base URL, Remote* components never hardcode "/api".
+        HttpTransport owns the base URL, proxies never hardcode "/api".
         """
         url = self._base_url.rstrip("/") + path
         query = _encode_query(params)
@@ -168,12 +165,20 @@ class HttpTransport(YCappuccinoComponent):
         return await pyodide_transport(method, url, headers, encoded_body)
 
 
+    async def dispatch(self, qualified_path: str, method_name: str, kwargs: dict) -> Any:
+        """one JSON-RPC call to `method_name` of the backend specification `qualified_path`, through
+        its __remote_dispatch__ service; returns the method's result, or raises the error the backend
+        answered (NotAuthenticated, Forbidden, NotFound, InvalidRequest, CrudError)"""
+        response = await self.request("POST", f"{DISPATCH_PATH}/{qualified_path}/{method_name}", body={"kwargs": kwargs})
+        return decode_envelope(response)["data"]["result"]
+
+
 def decode_envelope(response: RawResponse) -> dict:
     """
-    decode the {"status", "meta", "data"} envelope (http_server/README.md) a Remote* component
+    decode the {"status", "meta", "data"} envelope (http_server/README.md) a proxy
     got back from HttpTransport.request(), or raise the endpoints_storage error matching its HTTP
-    status - adapted from remote/call.py's _translate(), generalized to CRUD (not just services)
-    and without ServiceResult (RemoteServiceEndpoint builds that itself from the returned dict).
+    status - adapted from remote/call.py's _translate() (not imported: client does not depend on
+    remote).
     """
     if response.body:
         envelope = json.loads(response.body)

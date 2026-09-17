@@ -1,95 +1,96 @@
 """
-Runs, in plain CPython, the parts of README.md's examples that are actually runnable outside a
-browser: the app-code-only Catalog component (ICrud/IItemCatalog, never ycappuccino.client
-directly), the Login example (HttpTransport.set_token from a service call's response body), and
-the Book round-trip. Everything under "Bootstrap navigateur" (static/index.html, static/main.py,
-pyodide.loadPackage, micropip) is browser-only and NOT exercised here - it cannot be, without a
-real Pyodide runtime; see README.md "Limites et verifications manuelles requises".
+Runs the README examples that make sense outside a browser: the Account component (interfaces and
+ISession only, wired here by hand with proxies over a fake fetch), the generated module shape, and the
+Book round trip. The browser bootstrap is not runnable here; the real wiring against a real backend is
+test_client_framework.py.
 """
 
+import asyncio
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "example"))
 
 from library.books import Book  # noqa: E402
-from library.catalog import Catalog  # noqa: E402
 
-from fake_catalog import FakeItemCatalog  # noqa: E402
 from fake_fetcher import FakeFetcher  # noqa: E402
-from ycappuccino.client.components import RemoteCrud, RemoteItemCatalog, RemoteServiceEndpoint  # noqa: E402
-from ycappuccino.client.transport import HttpTransport  # noqa: E402
+from ycappuccino.api.core_base import YCappuccinoComponent  # noqa: E402
+from ycappuccino.api.endpoints_storage import ICrud  # noqa: E402
+from ycappuccino.api.permissions import ILoginService  # noqa: E402
+from ycappuccino.client import discovery  # noqa: E402
+from ycappuccino.client.rpc_proxy import make_rpc_proxy  # noqa: E402
+from ycappuccino.client.transport import HttpTransport, ISession  # noqa: E402
 
-BOOK_ITEM = {
-    "id": "book", "plural": "books", "app": "library", "module": "library.books",
-    "secure_read": False, "secure_write": False, "writable": True, "multipart": False, "refs": [],
-}
-
-
-class Login:
-    """mirrors README.md's "Session / authentification" example (Login component)"""
-
-    def __init__(self, services, transport):
-        self._services = services
-        self._transport = transport
-
-    async def log_in(self, login, password):
-        result = await self._services.call(
-            "login", "POST", [], {}, {"login": login, "password": password}, None
-        )
-        self._transport.set_token(result.body["token"])
+DISPATCH = "/api/services/__remote_dispatch__/"
+LOGIN = "ycappuccino.api.permissions.ILoginService"
+CRUD = "ycappuccino.api.endpoints_storage.ICrud"
 
 
-class TestReadmeCatalogExample(unittest.IsolatedAsyncioTestCase):
-    """mirrors README.md's "Ce que le code applicatif ecrit" + "Modele partage" sections"""
+class Account(YCappuccinoComponent):
 
-    async def test_catalog_depends_only_on_the_plain_interfaces_and_gets_wired_by_hand_here(self):
-        fetcher = FakeFetcher(
-            {
-                ("GET", "/api/items"): (200, [BOOK_ITEM], {"type": "array", "size": 1}),
-                ("GET", "/api/crud/books/dune"): (200, {"_id": "dune", "title": "Dune", "pages": 412}),
-            }
-        )
+    def __init__(self, login: ILoginService, crud: ICrud, session: ISession):
+        self._login = login
+        self._crud = crud
+        self._session = session
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+    async def sign_in(self, login: str, password: str) -> None:
+        self._session.set_token(await self._login.login(login, password))
+
+    async def organization(self, id: str) -> dict:
+        return await self._crud.get_one("organization", id)
+
+
+class TestAccountExample(unittest.IsolatedAsyncioTestCase):
+
+    async def test_signs_in_then_reads_with_the_token(self):
+        fetcher = FakeFetcher({
+            ("POST", DISPATCH + LOGIN + "/login"): (200, {"result": "eyJ"}),
+            ("POST", DISPATCH + CRUD + "/get_one"): (200, {"result": {"_id": "acme"}}),
+        })
         transport = HttpTransport(fetcher=fetcher)
-        await transport.start()
-        item_catalog = RemoteItemCatalog(transport)
-        await item_catalog.start()
-        crud = RemoteCrud(transport, item_catalog)
+        account = Account(make_rpc_proxy(ILoginService, LOGIN)(transport), make_rpc_proxy(ICrud, CRUD)(transport), transport)
 
-        catalog = Catalog(crud, item_catalog)
-        await catalog.start()
+        await account.sign_in("superadmin", "demo")
+        organization = await account.organization("acme")
 
-        self.assertEqual(catalog.items, [BOOK_ITEM])
-
-        document = await crud.get_one("book", "dune")
-        book = Book(document)
-        book.on_read(False)
-        self.assertEqual(book.get_storage_model()["title"], "Dune")
+        self.assertEqual(organization, {"_id": "acme"})
+        self.assertEqual(fetcher.calls[1][2]["Authorization"], "Bearer eyJ")
 
 
-class TestReadmeLoginExample(unittest.IsolatedAsyncioTestCase):
-    """mirrors README.md's "Session / authentification" login flow"""
+class TestGeneratedModuleExample(unittest.TestCase):
 
-    async def test_log_in_sets_the_token_from_the_service_result_body(self):
-        fetcher = FakeFetcher({("POST", "/api/services/login"): (200, {"token": "eyJ..."})})
-        transport = HttpTransport(fetcher=fetcher)
-        await transport.start()
-        services = RemoteServiceEndpoint(transport)
-        login = Login(services, transport)
+    def test_the_generated_module_declares_one_proxy_per_interface(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        fetcher = FakeFetcher({("GET", "/api/services/__remote_capabilities__"): (
+            200, {"services": [], "components": [{"module": "m", "class": "C", "provides": [CRUD, LOGIN]}]},
+        )})
 
-        await login.log_in("alice", "secret")
+        paths = asyncio.run(discovery.prepare_generated_module(os.path.join(directory, "generated_remote.py"), fetcher=fetcher))
 
-        self.assertEqual(transport.get_token(), "eyJ...")
+        self.assertEqual(paths, [CRUD, LOGIN])
+        with open(os.path.join(directory, "generated_remote.py")) as file:
+            source = file.read()
+        self.assertIn(f"RemoteCrud = make_rpc_proxy(ICrud, '{CRUD}')", source)
+        self.assertIn(f"RemoteLoginService = make_rpc_proxy(ILoginService, '{LOGIN}')", source)
 
 
-class TestReadmeSharedModelRoundTrip(unittest.TestCase):
+class TestSharedModelExample(unittest.TestCase):
+
     def test_the_book_round_trip_runs(self):
-        document = {"_id": "dune", "title": "Dune", "pages": 412}
-        book = Book(document)
+        book = Book({"_id": "dune", "title": "Dune", "pages": 412})
         book.on_read(False)
 
-        self.assertEqual(book.get_storage_model(), document)
+        self.assertEqual(book.get_storage_model(), {"_id": "dune", "title": "Dune", "pages": 412})
 
 
 if __name__ == "__main__":

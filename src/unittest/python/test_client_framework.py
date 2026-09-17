@@ -1,168 +1,223 @@
 """
-Real-framework integration test: starts a genuine ycappuccino.core.framework.Framework in
-CPython, with bundle_prefix listing "ycappuccino.client" itself (not a hand-constructed
-RemoteCrud/RemoteItemCatalog/RemoteServiceEndpoint) plus a small application package. The
-application's own Demo component depends on ICrud/IItemCatalog/IServiceEndpoint - the plain api
-interfaces, exactly as it would on a real backend - with ZERO reference to ycappuccino.client's
-classes (not even the fact that Remote* are synthesized by reflection, see remote_proxy.py):
-this is the proof that "include ycappuccino.client in bundle_prefix" is enough to make those
-interfaces resolve to RemoteCrud/RemoteItemCatalog/RemoteServiceEndpoint (ycappuccino.client
-.components) through real Pelix/iPOPO DI, with a REAL, introspectable, exec-forged __init__
-(see remote_proxy.py's _build_init and design spec §9.2) - the same ergonomics as "include
-ycappuccino.storage" giving a working IManager for free (core/README.md).
+End to end, over real HTTP: a real backend (storage, endpoints_storage, endpoints_service, http_server,
+permissions_app, and ycappuccino.remote's dispatch/capabilities modules) runs in a subprocess; this
+process runs the client exactly as the browser bootstrap does, only in CPython:
 
-FAKING THE TRANSPORT - A REAL BUG DISCOVERED WHILE WRITING THIS TEST, NOT A HYPOTHETICAL:
-the first version of this test published a fake ycappuccino.client.transport.IHttpFetcher
-component from PACKAGE (listed before ycappuccino.client in bundle_prefix, exactly like the
-Optional[IHttpFetcher] mechanism ycappuccino.client.transport.HttpTransport was designed
-around). It failed DETERMINISTICALLY (confirmed via direct instrumentation of
-HttpTransport.__init__: fetcher=None every single time), even though the fake fetcher's service
-was independently confirmed present and discoverable in the registry at that exact moment
-(framework.context.get_service_reference("IHttpFetcher") found it). Isolated by elimination
-(minimal repros with a hand-written Optional[IThing] consumer/provider pair): the bug reproduces
-ONLY when the consumer (HttpTransport) lives in the "ycappuccino.*" namespace package while the
-provider lives in a temporary test package - the EXACT SAME quirk hosts/servlet.py's own
-docstring already documents ("an optional dependency satisfied elsewhere in the same multi-path
-'ycappuccino.*' namespace package was observed to resolve non-deterministically (sometimes None)
-depending on scan timing"). hosts' own fix was to make the dependency mandatory instead; that is
-not an option here (HttpTransport's fetcher must default to none in real deployments). Fix used
-here instead: bypass Pelix DI entirely for the fake transport - monkeypatch the plain module-level
-function HttpTransport falls back to (ycappuccino.client.pyodide_transport.pyodide_transport) with
-plain Python attribute assignment, BEFORE starting the framework. HttpTransport.request() does
-`from ycappuccino.client.pyodide_transport import pyodide_transport` freshly on every call (never
-importing it at module level, see that module's docstring), so it picks up whatever function
-object is bound to that name at CALL time - a plain, single-threaded, GIL-protected attribute
-read/write, with none of Pelix's cross-namespace-package service-registry timing involved. This
-also means ycappuccino.client.transport.IHttpFetcher (kept in the code as a documented, but now
-KNOWN-FRAGILE-ACROSS-NAMESPACE-PACKAGES, extension point - see its docstring and design spec §9.4)
-is NOT exercised by this test; it IS exercised by test_transport.py, entirely in-process, with no
-Pelix involved at all, where this quirk cannot occur.
+1. discovery asks the backend which public interfaces it provides and writes the proxy module,
+2. a real Framework starts with ycappuccino.client.transport, that generated module and an application
+   package whose Demo component depends on ILoginService, ICrud and ISession only,
+3. Demo signs in and calls secured use cases through generated JSON-RPC proxies.
+
+The only substitution: ycappuccino.client.pyodide_transport.pyodide_transport, which needs Pyodide, is
+replaced by an equivalent urllib fetch. Nothing else is faked.
 """
 
+import asyncio
 import json
+import os
+import subprocess
+import sys
 import unittest
+import urllib.error
+import urllib.request
 
+from ycappuccino.api.endpoints_service import ServiceResult
+from ycappuccino.api.endpoints_storage import InvalidRequest, NotAuthenticated, NotFound
+from ycappuccino.client import discovery
+from ycappuccino.client.transport import RawResponse
 from ycappuccino.core.framework import Framework
 from ycappuccino.core.testing import TemporaryApplication, wait_until
 
-# plain CPython import: ycappuccino.client.transport never imports pelix/pyodide at module level.
-from ycappuccino.client.transport import RawResponse
+BACKEND_PORT = 18170
+BASE_URL = f"http://localhost:{BACKEND_PORT}/api"
+KEY = "client-test-key"
 
-APPLICATION = {
+BACKEND_APPLICATION = {
+    "conf/application.yml": f"""
+        name: clientbackend
+        bundle_prefix:
+          - ycappuccino.storage
+          - ycappuccino.endpoints_storage
+          - ycappuccino.endpoints_service
+          - ycappuccino.http_server
+          - ycappuccino.permissions
+          - ycappuccino.remote.dispatch
+          - ycappuccino.remote.capabilities
+        layers:
+          ycappuccino_storage_memory:
+            active: true
+        components:
+          JwtAuthentication:
+            key: {KEY}
+          LoginService:
+            key: {KEY}
+          LoginCookieService:
+            key: {KEY}
+          FrontendShell:
+            key: {KEY}
+        config:
+          http_server:
+            active: true
+            port: {BACKEND_PORT}
+            ip: localhost
+          shell:
+            console: false
+    """,
+    "conf/config.properties": "permissions.superadmin.password=demo\n",
+}
+
+CLIENT_APPLICATION = {
     "conf/application.yml": """
         name: clienttest
         bundle_prefix:
+          - ycappuccino.client.transport
+          - generated_remote
           - PACKAGE
-          - ycappuccino.client
         config:
           shell:
             console: false
     """,
+    "conf/config.properties": f"client.base_url={BASE_URL}\n",
     "PACKAGE/__init__.py": "",
     "PACKAGE/demo.py": """
         from ycappuccino.api.core_base import YCappuccinoComponent
-        from ycappuccino.api.endpoints_service import IServiceEndpoint
-        from ycappuccino.api.endpoints_storage import ICrud, IItemCatalog
+        from ycappuccino.api.endpoints_storage import ICrud
+        from ycappuccino.api.permissions import ILoginService
+        from ycappuccino.client.transport import ISession
 
 
         class Demo(YCappuccinoComponent):
-            items = None
-            document = None
-            echo_result = None
 
-            def __init__(self, crud: ICrud, catalog: IItemCatalog, services: IServiceEndpoint):
+            def __init__(self, login: ILoginService, crud: ICrud, session: ISession):
+                self._login = login
                 self._crud = crud
-                self._catalog = catalog
-                self._services = services
+                self._session = session
 
             async def start(self):
-                Demo.items = await self._catalog.get_items()
-                Demo.document = await self._crud.get_one("book", "dune")
-                result = await self._services.call("echo", "POST", [], {}, {"hi": 1}, None)
-                Demo.echo_result = result.body
+                pass
 
             async def stop(self):
                 pass
+
+            async def sign_in(self, login, password):
+                self._session.set_token(await self._login.login(login, password))
+
+            def sign_out(self):
+                self._session.clear_token()
+
+            async def create_organization(self, id, name):
+                return await self._crud.create("organization", {"_id": id, "name": name})
+
+            async def organization(self, id):
+                return await self._crud.get_one("organization", id)
     """,
 }
 
-BOOK = {
-    "id": "book", "plural": "books", "app": "library", "module": "library.books",
-    "secure_read": False, "secure_write": False, "writable": True, "multipart": False, "refs": [],
-}
+
+async def _urllib_fetch(method, url, headers, body):
+    def fetch():
+        request = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return RawResponse(status=response.status, headers={}, body=response.read())
+        except urllib.error.HTTPError as error:
+            with error:
+                return RawResponse(status=error.code, headers={}, body=error.read())
+
+    return await asyncio.to_thread(fetch)
 
 
-class FakeRequestLog:
-    """records every (method, path) HttpTransport's fallback fetch is asked to perform"""
-
-    calls: list = []
-
-
-async def _fake_pyodide_transport(method, url, headers, body):
-    FakeRequestLog.calls.append((method, url))
-    path = url.split("?", 1)[0]
-    if path == "/api/items":
-        payload = {"status": 200, "meta": {"type": "array", "size": 1}, "data": [BOOK]}
-    elif path == "/api/crud/books/dune":
-        payload = {
-            "status": 200, "meta": {"type": "object", "size": 1},
-            "data": {"_id": "dune", "title": "Dune"},
-        }
-    elif path == "/api/services/echo":
-        payload = {
-            "status": 200, "meta": {"type": "object", "size": 1},
-            "data": {"echo": json.loads(body) if body else None},
-        }
-    else:
-        payload = {"status": 404, "meta": {"type": "object"}, "data": {"error": "not found"}}
-    return RawResponse(status=payload["status"], headers={}, body=json.dumps(payload).encode())
+class UrllibFetcher:
+    async def fetch(self, method, url, headers, body):
+        return await _urllib_fetch(method, url, headers, body)
 
 
-class TestClientInFramework(unittest.TestCase):
+def _backend_is_ready():
+    """the HTTP port answers before every component is validated: wait for the login service to be
+    reported by the capabilities themselves"""
+    try:
+        with urllib.request.urlopen(f"{BASE_URL}/services/__remote_capabilities__", timeout=1) as response:
+            components = json.loads(response.read())["data"].get("components", [])
+    except (urllib.error.URLError, ConnectionError, ValueError):
+        return False
+    return any("ycappuccino.api.permissions.ILoginService" in component["provides"] for component in components)
+
+
+class TestClientAgainstARealBackend(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.backend_app = TemporaryApplication(BACKEND_APPLICATION).open()
+        cls.addClassCleanup(cls.backend_app.close)
+        cls.backend = subprocess.Popen(
+            [sys.executable, "-m", "ycappuccino.core.runner", "--root_path", cls.backend_app.root],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        cls.addClassCleanup(cls.backend.wait, 5)
+        cls.addClassCleanup(cls.backend.terminate)
+        if not wait_until(_backend_is_ready, timeout=15):
+            raise RuntimeError("the backend subprocess was not ready in time")
+
         import ycappuccino.client.pyodide_transport as pyodide_transport_module
 
-        cls._original_pyodide_transport = pyodide_transport_module.pyodide_transport
-        pyodide_transport_module.pyodide_transport = _fake_pyodide_transport
-        cls.addClassCleanup(setattr, pyodide_transport_module, "pyodide_transport", cls._original_pyodide_transport)
+        cls.addClassCleanup(setattr, pyodide_transport_module, "pyodide_transport", pyodide_transport_module.pyodide_transport)
+        pyodide_transport_module.pyodide_transport = _urllib_fetch
 
-        cls.app = TemporaryApplication(APPLICATION).open()
-        cls.addClassCleanup(cls.app.close)
+        cls.client_app = TemporaryApplication(CLIENT_APPLICATION).open()
+        cls.addClassCleanup(cls.client_app.close)
+        cls.proxied = asyncio.run(
+            discovery.prepare_generated_module(
+                os.path.join(cls.client_app.root, "generated_remote.py"), fetcher=UrllibFetcher(), base_url=BASE_URL
+            )
+        )
+        cls.addClassCleanup(sys.modules.pop, "generated_remote", None)
+
         cls.framework = Framework()
-        cls.framework.init(cls.app.yml_path)
+        cls.framework.init(cls.client_app.yml_path)
         cls.addClassCleanup(cls.framework.stop)
-        # generous timeout: this genuinely starts an AsyncRunner OS thread (core/async_runner.py)
-        # to validate every component; under a loaded machine, thread scheduling can be slow.
-        found = wait_until(lambda: cls.framework.context.get_service_reference("Demo"), timeout=15.0)
-        assert found, "Demo component did not register as a service within 15s"
+        if not wait_until(lambda: cls.framework.context.get_service_reference("Demo"), timeout=15):
+            raise RuntimeError("Demo was never validated: its proxies were not injected")
+        context = cls.framework.context
+        cls.demo = context.get_service(context.get_service_reference("Demo"))
+        cls.services = context.get_service(context.get_service_reference("IServiceEndpoint"))
+        cls.transport = context.get_service(context.get_service_reference("HttpTransport"))
 
-    def test_demo_receives_a_real_remote_item_catalog_through_plain_iitemcatalog(self):
-        demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.items is not None, timeout=15.0)
+    def setUp(self):
+        self.demo.sign_out()
 
-        self.assertEqual(demo_module.Demo.items[0]["id"], "book")
+    def test_discovery_proxies_the_public_interfaces_only(self):
+        self.assertIn("ycappuccino.api.permissions.ILoginService", self.proxied)
+        self.assertIn("ycappuccino.api.endpoints_storage.ICrud", self.proxied)
+        self.assertIn("ycappuccino.api.endpoints_service.IServiceEndpoint", self.proxied)
+        self.assertNotIn("ycappuccino.api.storage.IManager", self.proxied)
 
-    def test_demo_receives_a_real_remote_crud_through_plain_icrud(self):
-        demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.document is not None, timeout=15.0)
+    def test_a_secured_use_case_refuses_an_anonymous_client(self):
+        with self.assertRaises(NotAuthenticated):
+            asyncio.run(self.demo.organization("anything"))
 
-        self.assertEqual(demo_module.Demo.document, {"_id": "dune", "title": "Dune"})
+    def test_signed_in_the_client_writes_and_reads_with_its_user_rights(self):
+        asyncio.run(self.demo.sign_in("superadmin", "demo"))
 
-    def test_demo_receives_a_real_remote_service_endpoint_through_plain_iserviceendpoint(self):
-        demo_module = self.app.module("demo")
-        wait_until(lambda: demo_module.Demo.echo_result is not None, timeout=15.0)
+        asyncio.run(self.demo.create_organization("acme", "Acme"))
+        organization = asyncio.run(self.demo.organization("acme"))
 
-        self.assertEqual(demo_module.Demo.echo_result, {"echo": {"hi": 1}})
+        self.assertEqual(organization["name"], "Acme")
 
-    def test_every_call_went_through_the_fake_transport_not_a_real_network_call(self):
-        wait_until(lambda: len(FakeRequestLog.calls) >= 3, timeout=15.0)
+    def test_wrong_credentials_are_refused(self):
+        with self.assertRaises(InvalidRequest):
+            asyncio.run(self.demo.sign_in("superadmin", "wrong"))
 
-        paths = [path for _, path in FakeRequestLog.calls]
-        self.assertIn("/api/items", paths)
-        self.assertIn("/api/crud/books/dune", paths)
-        self.assertIn("/api/services/echo", paths)
+    def test_a_dataclass_result_comes_back_typed(self):
+        result = asyncio.run(
+            self.services.call("login", "POST", [], {}, {"login": "superadmin", "password": "demo"}, None)
+        )
+
+        self.assertIsInstance(result, ServiceResult)
+        self.assertIn("token", result.body)
+
+    def test_an_internal_interface_is_out_of_reach(self):
+        with self.assertRaises(NotFound):
+            asyncio.run(self.transport.dispatch("ycappuccino.api.storage.IManager", "get_many", {"item_id": "login"}))
 
 
 if __name__ == "__main__":

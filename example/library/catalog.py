@@ -4,11 +4,10 @@ IItemCatalog exactly like a server-side component would (compare endpoints_stora
 own `Shelf` example) - it never imports anything from ycappuccino.client, and never constructs
 RemoteCrud/RemoteItemCatalog itself. Whatever package provides those interfaces is none of its
 business: on a real backend that would be ycappuccino.endpoints_storage's own Crud/ItemCatalog, in
-the browser bundle it is ycappuccino.client's RemoteCrud/RemoteItemCatalog, auto-discovered the
-moment bundle_prefix includes "ycappuccino.client" - see client/README.md.
+the browser bundle they are ycappuccino.client's generated JSON-RPC proxies - see client/README.md.
 
 `items` is populated at start() and simply printed: this is the smallest possible proof that the
-chain "app component -> ICrud/IItemCatalog -> Remote* -> HttpTransport -> HTTP -> real backend"
+chain "app component -> ICrud/IItemCatalog -> proxy -> HttpTransport -> __remote_dispatch__ -> real backend"
 actually resolves through the real framework's DI, not a demonstration of a real UI.
 """
 
