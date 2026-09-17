@@ -10,9 +10,6 @@ Le client est une instance YCappuccino comme les autres : il utilise le même m�
 entre backends de [`remote`](../remote/README.md) (`__remote_dispatch__`), avec l'utilisateur connecté comme
 appelant. Conception : `remote/docs/superpowers/specs/2026-09-16-transparent-rpc-design.md`, section 11.
 
-**Risque assumé, à lire avant le reste : « Risques d'exécution navigateur » plus bas.** Rien de ce qui
-touche un vrai navigateur n'a pu être vérifié dans l'environnement qui a produit ce dépôt.
-
 ## Ce que le code applicatif écrit
 
 ```python
@@ -137,49 +134,41 @@ book.get_storage_model()  # {"_id": "dune", "title": "Dune", "pages": 412}
 
 ## Bootstrap navigateur : `static/index.html` + `static/main.py`
 
-Séquence, jamais exécutée dans un vrai navigateur ici :
+Séquence :
 
-1. Charger un build Pyodide **pthread**, page servie avec `Cross-Origin-Opener-Policy: same-origin` et
-   `Cross-Origin-Embedder-Policy: require-corp` (risque (a)).
-2. `pyodide.loadPackage("pyyaml")` (risque (b)).
-3. `micropip.install(url, deps=False)` pour `iPOPO`, `ycappuccino-api`, `ycappuccino-core`,
-   `ycappuccino-client`, puis les wheels de l'application.
-4. Écrire `conf/application.yml` dans le système de fichiers virtuel de Pyodide (risque (c)).
-5. `discovery.prepare_generated_module("bundle/generated_remote.py")`.
+1. Charger Pyodide (build standard, aucun en-tête particulier requis).
+2. `pyodide.loadPackage(["micropip", "pyyaml"])`.
+3. `micropip.install("iPOPO>=3.0")`, puis `micropip.install(url, deps=False)` pour `ycappuccino-api`,
+   `ycappuccino-core`, `ycappuccino-client` et les wheels de l'application.
+4. Écrire `conf/application.yml` dans le système de fichiers virtuel de Pyodide (`Framework.init` veut un
+   vrai chemin).
+5. `discovery.prepare_generated_module("bundle/generated_remote.py")`, puis `sys.path.insert(0, "bundle")`.
 6. `Framework().init("conf/application.yml")`, puis lire les composants de l'application.
 
-## Risques d'exécution navigateur
+## Vérifié dans un vrai navigateur (2026-09-17)
 
-**(a) Threads réels.** `core.async_runner.AsyncRunner` fait tourner une boucle asyncio sur un vrai thread
-OS : c'est ce qui démarre chaque composant natif. Un build Pyodide mono-thread ne peut pas en démarrer ;
-il faut un build pthread (threads WebAssembly via `SharedArrayBuffer`), donc une page servie avec les
-deux en-têtes COOP/COEP (`Host.cross_origin_isolated` dans `hosts`). Non vérifié : qu'un CDN public
-fournisse ce build, et qu'il fonctionne réellement.
+Chromium piloté par Playwright, Pyodide 0.28.3 (Python 3.13) depuis jsDelivr, page et `/api` servis par la
+même origine devant un vrai backend (`http_server`, `endpoints_*`, `permissions_app`,
+`remote.dispatch`/`capabilities`) :
 
-**(b) PyYAML.** `Framework.init()` lit l'`application.yml` avec PyYAML, chargé par le chargeur curaté de
-Pyodide. Non vérifié : sa présence dans la liste curatée de la version chargée.
+- iPOPO s'installe par micropip, le `Framework` démarre, les composants natifs sont validés et publiés ;
+- la découverte passe par le vrai `pyodide_transport` (`pyfetch`) et génère un proxy par interface publique ;
+- un composant qui dépend d'`ILoginService`, `ICrud` et `ISession` est injecté ; une lecture anonyme lève
+  `NotAuthenticated`, `ILoginService.login()` rend un jeton, les appels suivants passent authentifiés.
 
-**(c) Chemin de fichier.** `Framework.init(yml_path)` veut un vrai fichier : le bootstrap l'écrit dans le
-système de fichiers virtuel de Pyodide.
+Pyodide ne peut démarrer aucun thread : `core.async_runner.AsyncRunner` exécute alors les coroutines des
+composants sur le thread appelant (voir le README de `core`), sans build pthread ni en-têtes COOP/COEP.
 
-**(d) `Set-Cookie` illisible.** `fetch()` n'expose jamais `Set-Cookie`. Le jeton vient donc du résultat de
+Restent non vérifiés : `static/` tel quel (la vérification a utilisé une page équivalente), Firefox et
+Safari, et la construction et la mise à disposition des wheels par `hosts`.
+
+**`Set-Cookie` illisible.** `fetch()` n'expose jamais `Set-Cookie` : le jeton vient du résultat de
 `ILoginService.login()`, jamais d'un cookie.
 
-**(e) COOP/COEP et CDN tiers.** Ces en-têtes peuvent empêcher de charger Pyodide depuis un CDN qui n'envoie
-pas d'en-têtes CORP/CORS compatibles.
+## Tests
 
-## Ce qui est prouvé, ce qui ne l'est pas
-
-Prouvé par `test_client_framework.py`, exécuté en CPython : un vrai backend en sous-processus
-(`http_server`, `endpoints_*`, `permissions_app`, `remote.dispatch`/`capabilities`), un vrai `Framework`
-client qui découvre ses interfaces publiques, génère et installe les proxies, injecte `ILoginService`/
-`ICrud`/`ISession` dans un composant applicatif, se connecte, écrit et relit avec les droits de
-l'utilisateur, se voit refuser une lecture anonyme et une interface interne. Seul
-`pyodide_transport` y est remplacé par un fetch `urllib` équivalent.
-
-Non prouvé, à vérifier en navigateur avant toute mise en production : les risques (a), (b), (e) ;
-`pyodide.http.pyfetch` réel (noms d'options, forme de la réponse) ; iPOPO sous Pyodide ; `static/` ; la
-construction et la mise à disposition des wheels.
+`test_client_framework.py`, en CPython : même scénario contre un vrai backend en sous-processus, avec un
+fetch `urllib` à la place de `pyodide_transport`.
 
 ## Développer client
 
