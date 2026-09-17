@@ -10,7 +10,7 @@
 
   Serve it on the same origin as the backend's /api. The application's components draw into #app.
 -->
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -19,7 +19,7 @@
 </head>
 <body>
   <div id="app"></div>
-  <p id="ycappuccino-status" role="status">Chargement…</p>
+  <p id="ycappuccino-status" role="status">Loading…</p>
   <script>
     const status = (text) => { document.getElementById("ycappuccino-status").textContent = text; };
     (async () => {
@@ -32,12 +32,12 @@
         await pyodide.runPythonAsync(`
 import micropip
 
-status("Installation des paquets…")
+status("Installing packages…")
 await micropip.install("iPOPO>=3.0")
 for wheel in application["wheels"]:
     await micropip.install(wheel, deps=False)
 
-status("Démarrage du framework…")
+status("Starting the framework…")
 from ycappuccino.client.bootstrap import start_client
 
 await start_client(
@@ -46,7 +46,7 @@ await start_client(
 status("")
 `);
       } catch (error) {
-        status("Erreur : " + error);
+        status("Error: " + error);
         console.error(error);
       }
     })();
