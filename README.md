@@ -156,7 +156,7 @@ Page générique, servie sur la même origine que l'`/api` du backend, à côté
  "wheels": ["wheels/ycappuccino_api-0.1.0-py3-none-any.whl", "wheels/ycappuccino_core-0.1.0-py3-none-any.whl",
             "wheels/ycappuccino_client-0.1.0-py3-none-any.whl", "..."],
  "bundles": ["ycappuccino.ui_web.page", "myapp"],
- "components": {"PyodidePage": {"mount_selector": "#app"}}}
+ "components": {"PyodidePage": {"mount_selector": "#app", "stylesheets": "style.css"}}}
 ```
 
 Elle charge Pyodide et PyYAML, installe iPOPO puis les wheels (`deps=False`), et appelle `start_client`. Les
