@@ -430,6 +430,12 @@ requires-dist = [
     { name = "ycappuccino-ui-web", editable = "../ui_web" },
 ]
 
+[package.metadata.requires-dev]
+dev = [
+    { name = "ycappuccino-http-server", editable = "../http_server" },
+    { name = "ycappuccino-remote", editable = "../remote" },
+]
+
 [[package]]
 name = "ycappuccino-remote"
 version = "0.1.0"
