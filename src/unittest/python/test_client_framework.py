@@ -49,9 +49,7 @@ BACKEND_APPLICATION = {
         components:
           JwtAuthentication:
             key: {KEY}
-          LoginService:
-            key: {KEY}
-          LoginCookieService:
+          PasswordLogin:
             key: {KEY}
           FrontendShell:
             key: {KEY}
