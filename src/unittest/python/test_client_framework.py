@@ -3,10 +3,10 @@ End to end, over real HTTP: a real backend (storage, endpoints_storage, endpoint
 permissions_app, and ycappuccino.remote's dispatch/capabilities modules) runs in a subprocess; this
 process runs the client exactly as the browser bootstrap does, only in CPython:
 
-1. discovery asks the backend which public interfaces it provides and writes the proxy module,
-2. a real Framework starts with ycappuccino.client.transport, that generated module and an application
-   package whose Demo component depends on ILoginService, ICrud and ISession only,
-3. Demo signs in and calls secured use cases through generated JSON-RPC proxies.
+1. bootstrap.start_client: discovery asks the backend which public interfaces it provides and writes the
+   proxy module, then a real Framework starts with ycappuccino.client.transport, that generated module and
+   an application package whose Demo component depends on ILoginService, ICrud and ISession only,
+2. Demo signs in and calls secured use cases through generated JSON-RPC proxies.
 
 The only substitution: ycappuccino.client.pyodide_transport.pyodide_transport, which needs Pyodide, is
 replaced by an equivalent urllib fetch. Nothing else is faked.
@@ -14,7 +14,6 @@ replaced by an equivalent urllib fetch. Nothing else is faked.
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -23,9 +22,8 @@ import urllib.request
 
 from ycappuccino.api.endpoints_service import ServiceResult
 from ycappuccino.api.endpoints_storage import InvalidRequest, NotAuthenticated, NotFound
-from ycappuccino.client import discovery
+from ycappuccino.client import bootstrap
 from ycappuccino.client.transport import RawResponse
-from ycappuccino.core.framework import Framework
 from ycappuccino.core.testing import TemporaryApplication, wait_until
 
 BACKEND_PORT = 18170
@@ -65,17 +63,6 @@ BACKEND_APPLICATION = {
 }
 
 CLIENT_APPLICATION = {
-    "conf/application.yml": """
-        name: clienttest
-        bundle_prefix:
-          - ycappuccino.client.transport
-          - generated_remote
-          - PACKAGE
-        config:
-          shell:
-            console: false
-    """,
-    "conf/config.properties": f"client.base_url={BASE_URL}\n",
     "PACKAGE/__init__.py": "",
     "PACKAGE/demo.py": """
         from ycappuccino.api.core_base import YCappuccinoComponent
@@ -163,15 +150,13 @@ class TestClientAgainstARealBackend(unittest.TestCase):
 
         cls.client_app = TemporaryApplication(CLIENT_APPLICATION).open()
         cls.addClassCleanup(cls.client_app.close)
-        cls.proxied = asyncio.run(
-            discovery.prepare_generated_module(
-                os.path.join(cls.client_app.root, "generated_remote.py"), fetcher=UrllibFetcher(), base_url=BASE_URL
+        cls.addClassCleanup(sys.modules.pop, "generated_remote", None)
+        cls.framework, cls.proxied = asyncio.run(
+            bootstrap.start_client(
+                "clienttest", [cls.client_app.package], properties={"client.base_url": BASE_URL},
+                root=cls.client_app.root, fetcher=UrllibFetcher(), base_url=BASE_URL,
             )
         )
-        cls.addClassCleanup(sys.modules.pop, "generated_remote", None)
-
-        cls.framework = Framework()
-        cls.framework.init(cls.client_app.yml_path)
         cls.addClassCleanup(cls.framework.stop)
         if not wait_until(lambda: cls.framework.context.get_service_reference("Demo"), timeout=15):
             raise RuntimeError("Demo was never validated: its proxies were not injected")

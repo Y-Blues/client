@@ -132,18 +132,35 @@ book.on_read(False)
 book.get_storage_model()  # {"_id": "dune", "title": "Dune", "pages": 412}
 ```
 
-## Bootstrap navigateur : `static/index.html` + `static/main.py`
+## Démarrer un client : `bootstrap.start_client`
 
-Séquence :
+```python
+from ycappuccino.client.bootstrap import start_client
 
-1. Charger Pyodide (build standard, aucun en-tête particulier requis).
-2. `pyodide.loadPackage(["micropip", "pyyaml"])`.
-3. `micropip.install("iPOPO>=3.0")`, puis `micropip.install(url, deps=False)` pour `ycappuccino-api`,
-   `ycappuccino-core`, `ycappuccino-client` et les wheels de l'application.
-4. Écrire `conf/application.yml` dans le système de fichiers virtuel de Pyodide (`Framework.init` veut un
-   vrai chemin).
-5. `discovery.prepare_generated_module("bundle/generated_remote.py")`, puis `sys.path.insert(0, "bundle")`.
-6. `Framework().init("conf/application.yml")`, puis lire les composants de l'application.
+framework, proxied = await start_client("admin", ["ycappuccino.ui_web.page", "myapp"], components={...})
+```
+
+1. découverte, et écriture d'un proxy par interface publique dans `<root>/generated_remote.py` ;
+2. écriture de `<root>/conf/application.yml` (`bundle_prefix` : `ycappuccino.client.transport`, les proxies,
+   puis les bundles de l'application) et de `<root>/conf/config.properties` (`properties`) ;
+3. `<root>` devient le répertoire courant et importable, puis `Framework().init()`.
+
+`test_client_framework.py` démarre son client ainsi.
+
+## Page navigateur : `static/index.html`
+
+Page générique, servie sur la même origine que l'`/api` du backend, à côté d'un `ycappuccino.json` :
+
+```json
+{"name": "admin",
+ "wheels": ["wheels/ycappuccino_api-0.1.0-py3-none-any.whl", "wheels/ycappuccino_core-0.1.0-py3-none-any.whl",
+            "wheels/ycappuccino_client-0.1.0-py3-none-any.whl", "..."],
+ "bundles": ["ycappuccino.ui_web.page", "myapp"],
+ "components": {"PyodidePage": {"mount_selector": "#app"}}}
+```
+
+Elle charge Pyodide et PyYAML, installe iPOPO puis les wheels (`deps=False`), et appelle `start_client`. Les
+composants de l'application dessinent dans `#app`.
 
 ## Vérifié dans un vrai navigateur (2026-09-17)
 
@@ -159,7 +176,7 @@ même origine devant un vrai backend (`http_server`, `endpoints_*`, `permissions
 Pyodide ne peut démarrer aucun thread : `core.async_runner.AsyncRunner` exécute alors les coroutines des
 composants sur le thread appelant (voir le README de `core`), sans build pthread ni en-têtes COOP/COEP.
 
-Restent non vérifiés : `static/` tel quel (la vérification a utilisé une page équivalente), Firefox et
+Restent non vérifiés : Firefox et
 Safari, et la construction et la mise à disposition des wheels par `hosts`.
 
 **`Set-Cookie` illisible.** `fetch()` n'expose jamais `Set-Cookie` : le jeton vient du résultat de

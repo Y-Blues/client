@@ -2,14 +2,8 @@
 pyodide_transport: the fetch HttpTransport uses when no IHttpFetcher is published (the real
 deployment case: a browser page, running under Pyodide).
 
-NOT verified in this sandbox: there is no real Pyodide runtime available here (no network access
-to fetch it, and this module is plain CPython). This function is written from the known Pyodide
-API surface (pyodide.http.pyfetch, FetchResponse.status/.bytes()), but its exact behaviour -
-fetch option names, header casing, credentials/CORS handling, and whether FetchResponse.bytes()
-still exists under this shape in the Pyodide version actually loaded by static/index.html - is
-NOT proven by anything in this repository. Manual verification in a real browser is required
-before relying on this in production; see client/README.md "Limites et verifications manuelles
-requises".
+Verified in Chromium with Pyodide 0.28.3 (2026-09-17, see README): discovery, login and authenticated
+calls go through this function. Not verified in Firefox or Safari.
 
 pyodide.http is imported here, inside the function, never at module import time: this keeps
 ycappuccino.client.transport importable (and unit-testable) in plain CPython, where pyodide does

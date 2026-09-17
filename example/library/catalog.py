@@ -20,7 +20,7 @@ class Catalog(YCappuccinoComponent):
     def __init__(self, crud: ICrud, catalog: IItemCatalog):
         self._crud = crud
         self._catalog = catalog
-        self.items = None  # populated by start(); read by static/main.py and by tests
+        self.items = None  # populated by start(); read by tests
 
     async def start(self):
         self.items = await self._catalog.get_items()

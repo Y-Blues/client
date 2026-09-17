@@ -1,50 +1,55 @@
 <!DOCTYPE html>
 <!--
-  NOT executable/testable in this repository's CPython test suite: this is a browser asset, meant
-  to be served by a Host (see hosts/README.md) alongside main.py. It could not be opened in a
-  real browser while writing it (no network access to fetch Pyodide/pyscript from a CDN in this
-  sandbox). MANUAL BROWSER VERIFICATION REQUIRED before relying on it - see README.md "Limites et
-  verifications manuelles requises" and its "Risques d'execution navigateur" section.
+  Generic page starting a client YCappuccino Framework in the browser (Pyodide), described by
+  ./ycappuccino.json next to it:
 
-  IMPORTANT, read before deploying this page behind a Host: main.py starts a real
-  ycappuccino.core.framework.Framework, whose ycappuccino.core.async_runner.AsyncRunner needs to
-  start a genuine OS thread. A standard single-threaded Pyodide build CANNOT do this. This page
-  MUST be served by a Host with `cross_origin_isolated: true` (see hosts/README.md) - which sends
-  Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp,
-  required for SharedArrayBuffer, itself required by a pthread-enabled Pyodide build - AND the
-  Pyodide/pyscript build loaded below must actually be a pthread build. NOT verified here whether
-  the standard CDN distribution referenced below is one, or how to select one explicitly - see
-  client/README.md "Risques d'execution navigateur" (a).
+    {"name": "admin",
+     "wheels": ["wheels/ycappuccino_api-0.1.0-py3-none-any.whl", "..."],
+     "bundles": ["ycappuccino.ui_web.page", "myapp"],
+     "components": {"PyodidePage": {"mount_selector": "#app"}}}
 
-  pyscript CDN pinned to an exact version, the same convention already used in this codebase for
-  a CDN-loaded page (see swagger/src/main/python/ycappuccino/swagger/ui.py, which pins
-  swagger-ui-dist@4.5.0 rather than @latest). 2024.11.1 is a real pyscript.net release at the time
-  this file was written; its continued availability, and whether it resolves to a pthread-capable
-  Pyodide, are NOT verified here.
+  Serve it on the same origin as the backend's /api. The application's components draw into #app.
 -->
-<html lang="en">
+<html lang="fr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="ycappuccino client: real Framework, real DI, remote ICrud/IItemCatalog/IServiceEndpoint" />
-  <title>ycappuccino client</title>
-  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css" />
-  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+  <title>YCappuccino</title>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"></script>
 </head>
 <body>
-  <h1>ycappuccino client</h1>
-  <p>
-    Starts a real <code>ycappuccino.core.framework.Framework</code> under Pyodide and reads the
-    DI-resolved <code>Catalog</code> component (<code>example/library/catalog.py</code>), itself
-    wired to <code>RemoteCrud</code>/<code>RemoteItemCatalog</code> (<code>ycappuccino.client</code>)
-    behind the plain <code>ICrud</code>/<code>IItemCatalog</code> interfaces. See <code>main.py</code>
-    and <code>client/README.md</code> "Risques d'execution navigateur" before deploying this for
-    real: this requires a pthread-enabled Pyodide build and a cross-origin-isolated page (see
-    hosts/README.md's <code>Host.cross_origin_isolated</code>), neither of which could be verified
-    in the sandbox that produced this file.
-  </p>
-  <div id="status">loading...</div>
-  <ul id="items"></ul>
-  <script type="py" src="./main.py"></script>
+  <div id="app"></div>
+  <p id="ycappuccino-status" role="status">Chargement…</p>
+  <script>
+    const status = (text) => { document.getElementById("ycappuccino-status").textContent = text; };
+    (async () => {
+      try {
+        const application = await (await fetch("./ycappuccino.json")).json();
+        const pyodide = await loadPyodide();
+        await pyodide.loadPackage(["micropip", "pyyaml"]);
+        pyodide.globals.set("application", pyodide.toPy(application));
+        pyodide.globals.set("status", status);
+        await pyodide.runPythonAsync(`
+import micropip
+
+status("Installation des paquets…")
+await micropip.install("iPOPO>=3.0")
+for wheel in application["wheels"]:
+    await micropip.install(wheel, deps=False)
+
+status("Démarrage du framework…")
+from ycappuccino.client.bootstrap import start_client
+
+await start_client(
+    application["name"], application["bundles"], application.get("components"), root="/home/pyodide/app"
+)
+status("")
+`);
+      } catch (error) {
+        status("Erreur : " + error);
+        console.error(error);
+      }
+    })();
+  </script>
 </body>
 </html>
