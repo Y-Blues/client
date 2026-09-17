@@ -29,7 +29,7 @@ of the fetch spec, not a Pyodide-specific guess.
 from ycappuccino.client.transport import RawResponse
 
 
-async def pyodide_transport(method: str, url: str, headers: dict, body):
+async def pyodide_transport(method: str, url: str, headers: dict, body: bytes | None) -> RawResponse:
     try:
         from pyodide.http import pyfetch
     except ImportError as error:

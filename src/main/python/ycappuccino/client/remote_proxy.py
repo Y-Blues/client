@@ -18,7 +18,7 @@ reliably, categorically different from a per-method route table.
 
 import inspect
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from ycappuccino.api.endpoints_service import ServiceResult
 from ycappuccino.api.endpoints_storage import NotFound
@@ -85,7 +85,7 @@ def _abstract_business_methods(interface: type) -> list:
     )
 
 
-def _find_bulk_method(interface: type, method_names: list):
+def _find_bulk_method(interface: type, method_names: list) -> str | None:
     """convention 4: the get_* method whose every parameter (besides self) has a default -
     the interface's "fetch the whole collection" accessor, if it has one"""
     for name in method_names:
@@ -104,7 +104,7 @@ def _identity_keyword(bulk_method_name: str) -> str:
     return remainder[:-1] if remainder.endswith("s") else remainder
 
 
-def _build_init(extra_deps: dict):
+def _build_init(extra_deps: dict) -> Callable:
     """forges a REAL, introspectable __init__ (real parameter names, real type annotations -
     not a **kwargs sink) via exec, the same technique dataclasses/attrs/namedtuple use - see
     spec §9.2. describe_component (core/component_factory.py) inspects this by name/annotation,
@@ -120,7 +120,7 @@ def _build_init(extra_deps: dict):
     return namespace["__init__"]
 
 
-def _build_method(name: str, signature: inspect.Signature):
+def _build_method(name: str, signature: inspect.Signature) -> Callable:
     """forges a method with the SAME calling convention as the interface's own abstract method
     (same parameter names/defaults, so callers positionally/by-keyword exactly as they would a
     hand-written component), whose body only ever calls self._dispatch(name, {param: value})"""
@@ -158,13 +158,13 @@ class _RemoteProxyBase:
     _ycappuccino_identity_keyword = None
     _ycappuccino_cache = None
 
-    async def start(self):
+    async def start(self) -> None:
         if self._ycappuccino_bulk_method_name:
             response = await self._transport.request("GET", f"/{self._ycappuccino_resource}")
             envelope = decode_envelope(response)
             self._ycappuccino_cache = list(envelope["data"])
 
-    async def stop(self):
+    async def stop(self) -> None:
         pass
 
     async def _dispatch(self, method_name: str, kwargs: dict) -> Any:
@@ -237,14 +237,14 @@ class _RemoteProxyBase:
         envelope = decode_envelope(response)
         return ServiceResult(body=envelope["data"])
 
-    def _cache_lookup(self, method_name: str, field: str, kwargs: dict):
+    def _cache_lookup(self, method_name: str, field: str, kwargs: dict) -> Any:
         value = next(iter(kwargs.values()), None)
         item = self._lookup_cache(field, value)
         if item is None:
             raise NotFound(f"unknown {field} {value!r}")
         return item
 
-    def _lookup_cache(self, field: str, value):
+    def _lookup_cache(self, field: str, value: Any) -> dict | None:
         for item in self._ycappuccino_cache or []:
             if item.get(field) == value:
                 return item
@@ -278,7 +278,7 @@ def _infer_verb(method_name: str) -> str:
     return "POST"  # create, publish, and any other unrecognized action
 
 
-def _suffix_for(method_name: str, verb: str):
+def _suffix_for(method_name: str, verb: str) -> str | None:
     """convention 2's trailing segment: never for a standard CRUD-shaped name or a
     DELETE/PUT verb (already disambiguated by verb + argument shape alone - this is exactly
     what keeps `discard` route-compatible with `save`/`get_one`, see spec §9.3)"""
@@ -289,7 +289,7 @@ def _suffix_for(method_name: str, verb: str):
     return method_name  # POST (e.g. "publish")
 
 
-def _cache_lookup_field(method_name: str, identity_keyword: str):
+def _cache_lookup_field(method_name: str, identity_keyword: str) -> str | None:
     """convention 4: get_<identity> -> lookup by "id"; get_<identity>_by_<field> -> lookup by
     <field> (parsed from the method's own name, never hardcoded)"""
     if not method_name.startswith("get_"):
@@ -303,7 +303,7 @@ def _cache_lookup_field(method_name: str, identity_keyword: str):
     return None
 
 
-def _shape_result(method_name: str, envelope: dict):
+def _shape_result(method_name: str, envelope: dict) -> Any:
     """convention 5"""
     if method_name == "get_many":
         data = envelope["data"]

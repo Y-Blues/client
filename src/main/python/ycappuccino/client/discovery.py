@@ -61,7 +61,7 @@ any discovered specification that is not already in `KNOWN_INTERFACES`, on purpo
 """
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from ycappuccino.api.endpoints_service import IServiceEndpoint
 from ycappuccino.client.known_interfaces import KNOWN_INTERFACES, remote_class_name
@@ -105,7 +105,7 @@ async def discover_backend_provides(
     return _extract_provides(getattr(result, "body", None))
 
 
-def _extract_provides(body) -> Optional[set]:
+def _extract_provides(body: Any) -> Optional[set]:
     """
     ASSUMED shape (convention, not contract - see module docstring point 1): `body` mirrors
     Framework.list_components()'s own list of {"module", "class", "provides"} dicts (the natural

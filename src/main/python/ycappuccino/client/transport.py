@@ -114,17 +114,17 @@ class HttpTransport(YCappuccinoComponent):
         self,
         configuration: Optional[IConfiguration] = None,
         fetcher: Optional[IHttpFetcher] = None,
-    ):
+    ) -> None:
         self._configuration = configuration
         self._fetcher = fetcher
         self._base_url = DEFAULT_BASE_URL
         self._token: Optional[str] = None
 
-    async def start(self):
+    async def start(self) -> None:
         if self._configuration is not None:
             self._base_url = self._configuration.get(_CONFIG_KEY, DEFAULT_BASE_URL)
 
-    async def stop(self):
+    async def stop(self) -> None:
         pass
 
     # ------------------------------------------------------------------ token (session state)
