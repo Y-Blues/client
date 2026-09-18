@@ -432,6 +432,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ycappuccino-hosts", editable = "../hosts" },
     { name = "ycappuccino-http-server", editable = "../http_server" },
     { name = "ycappuccino-remote", editable = "../remote" },
 ]
