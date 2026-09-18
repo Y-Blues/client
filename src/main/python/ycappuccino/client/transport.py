@@ -29,7 +29,8 @@ from ycappuccino.api.endpoints_storage import (
 )
 
 DEFAULT_BASE_URL = "/api"
-_CONFIG_KEY = "client.base_url"
+# the configuration key of the backend API URL (conf/config.properties)
+CLIENT_BASE_URL = "client.base_url"
 
 _ERROR_BY_STATUS = {
     401: NotAuthenticated,
@@ -119,7 +120,7 @@ class HttpTransport(ISession):
 
     async def start(self) -> None:
         if self._configuration is not None:
-            self._base_url = self._configuration.get(_CONFIG_KEY, DEFAULT_BASE_URL)
+            self._base_url = self._configuration.get(CLIENT_BASE_URL, DEFAULT_BASE_URL)
 
     async def stop(self) -> None:
         pass

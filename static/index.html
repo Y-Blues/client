@@ -6,9 +6,11 @@
     {"name": "admin",
      "wheels": ["wheels/ycappuccino_api-0.1.0-py3-none-any.whl", "..."],
      "bundles": ["ycappuccino.ui_web.page", "myapp"],
-     "components": {"PyodidePage": {"mount_selector": "#app", "stylesheets": "style.css"}}}
+     "components": {"PyodidePage": {"mount_selector": "#app", "stylesheets": "style.css"}},
+     "properties": {"client.base_url": "http://localhost:8303/api"}}   <- optional: an API on another origin
 
-  Serve it on the same origin as the backend's /api. The application's components draw into #app.
+  Serve it on the same origin as the backend's /api, or set client.base_url to an API allowing this page's
+  origin (CORS, ApiServlet allowed_origins). The application's components draw into #app.
 -->
 <html lang="en">
 <head>
@@ -41,7 +43,8 @@ status("Starting the framework…")
 from ycappuccino.client.bootstrap import start_client
 
 await start_client(
-    application["name"], application["bundles"], application.get("components"), root="/home/pyodide/app"
+    application["name"], application["bundles"], application.get("components"),
+    properties=application.get("properties"), root="/home/pyodide/app",
 )
 status("")
 `);

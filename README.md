@@ -159,7 +159,10 @@ Page générique, servie sur la même origine que l'`/api` du backend, à côté
  "components": {"PyodidePage": {"mount_selector": "#app", "stylesheets": "style.css"}}}
 ```
 
-Elle charge Pyodide et PyYAML, installe iPOPO puis les wheels (`deps=False`), et appelle `start_client`. Les
+Elle charge Pyodide et PyYAML, installe iPOPO puis les wheels (`deps=False`), et appelle `start_client`. Une
+clé optionnelle `properties` est passée à `start_client` : `{"client.base_url": "http://localhost:8303/api"}`
+fait appeler une API servie par une autre origine (qui doit l'autoriser, CORS : `ApiServlet`
+`allowed_origins` dans `http_server`) ; la découverte interroge alors cette même API. Les
 composants de l'application dessinent dans `#app`.
 
 ## Vérifié dans un vrai navigateur (2026-09-17)

@@ -19,7 +19,7 @@ from typing import Any
 import yaml
 
 from ycappuccino.client import discovery
-from ycappuccino.client.transport import IHttpFetcher
+from ycappuccino.client.transport import CLIENT_BASE_URL, IHttpFetcher
 from ycappuccino.core.framework import Framework
 
 GENERATED_MODULE = "generated_remote"
@@ -36,6 +36,14 @@ def application_yml(name: str, bundles: list[str], components: dict[str, dict] |
     return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
 
 
+def api_base_url(base_url: str | None, properties: dict[str, str] | None) -> str | None:
+    """the backend API discovery asks: the explicit one, else the configured client.base_url (the one the
+    proxies call), else None -- the page's own origin"""
+    if base_url is not None:
+        return base_url
+    return (properties or {}).get(CLIENT_BASE_URL)
+
+
 async def start_client(
     name: str,
     bundles: list[str],
@@ -49,7 +57,7 @@ async def start_client(
     root = os.path.abspath(root)
     os.makedirs(os.path.join(root, "conf"), exist_ok=True)
     proxied = await discovery.prepare_generated_module(
-        os.path.join(root, f"{GENERATED_MODULE}.py"), fetcher=fetcher, base_url=base_url
+        os.path.join(root, f"{GENERATED_MODULE}.py"), fetcher=fetcher, base_url=api_base_url(base_url, properties)
     )
     yml_path = os.path.join(root, "conf", "application.yml")
     with open(yml_path, "w") as file:
